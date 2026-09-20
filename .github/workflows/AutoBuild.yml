@@ -264,7 +264,7 @@ jobs:
           fi
 
           echo "tag=$TAG" >> $GITHUB_OUTPUT
-          echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+          echo "  上游最新版本: ${LATEST_TAG}"
 
           echo "=========================================="
 
@@ -687,7 +687,6 @@ jobs:
           echo "FIRMWARE=$STAGE_DIR" >> $GITHUB_ENV
           echo "ARTIFACT_DIR=$ARTIFACT_DIR" >> $GITHUB_ENV
           echo "device_id=${DEVICE_ID}" >> $GITHUB_OUTPUT
-          echo "artifact_dir=${ARTIFACT_DIR}" >> $GITHUB_OUTPUT
           echo "status=success" >> $GITHUB_OUTPUT
 
       # ----------------------------------------------------------
