@@ -13,9 +13,13 @@
 #   - 拉取上游全部正式标签（排除 -rc 等预发布版本）
 #   - 保留最新的 KEEP_COUNT 个，重新写入 AutoBuild.yml 的 tag.options
 #   - 无变化则不做任何提交
-#   - 有变化则推送到 sync-versions 分支并创建 PR，需人工合并后生效
-#     （原因：GITHUB_TOKEN 无权直接修改 .github/workflows/ 下的文件，
-#       详见 [4] 步骤注释）
+#   - 有变化则用 SYNC_TOKEN 直接提交推送
+#
+# 前置条件：仓库需配置 Secret「SYNC_TOKEN」（细粒度 PAT）
+#   GitHub 不允许默认 GITHUB_TOKEN 修改 .github/workflows/ 下的文件
+#   （防止 Actions 自我提权），故此步骤必须使用 PAT。
+#   权限：Contents 读写 + Workflows 读写。
+#   未配置时工作流会在 [4] 步骤输出配置指引并失败，不会静默跳过。
 #
 # 实际改写逻辑见 .github/scripts/SyncTags.py
 #
@@ -35,9 +39,9 @@ env:
   # 下拉列表中保留的历史版本数量
   KEEP_COUNT: 8
 
+# 推送依赖 SYNC_TOKEN，这里只需读取权限
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 jobs:
   sync:
@@ -46,8 +50,13 @@ jobs:
     timeout-minutes: 15
 
     steps:
+      # 使用 SYNC_TOKEN（细粒度 PAT）clone，使后续 push 具备改动
+      # .github/workflows/ 下文件所需的 workflows 权限。
+      # 未配置时回退为默认 GITHUB_TOKEN（此时 [4] 会给出配置指引）。
       - name: "[1] 克隆配置仓库"
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.SYNC_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: "[2] 获取上游版本标签"
         run: |
@@ -95,91 +104,89 @@ jobs:
           sed -n '/^      tag:/,/^      cache_enabled:/p' .github/workflows/AutoBuild.yml
 
       # ----------------------------------------------------------
-      # [4] 提交变更（通过 Pull Request）
+      # [4] 提交变更
       #
-      # 为什么不直接 push：
-      #   GitHub 禁止 GITHUB_TOKEN（GitHub App 身份）直接创建或修改
+      # 必须使用 SYNC_TOKEN（细粒度 PAT），不能用默认 GITHUB_TOKEN：
+      #   GitHub 禁止 GITHUB_TOKEN（GitHub App 身份）创建或修改
       #   .github/workflows/ 下的文件，否则报：
       #     refusing to allow a GitHub App to create or update workflow
       #     `.github/workflows/AutoBuild.yml` without `workflows` permission
-      #   该 workflows 权限既不能在 workflow 的 permissions 块中声明，
-      #   也无法通过仓库的 Actions 默认权限设置授予（已实测无效）。
+      #   该限制已实测无法绕过：
+      #     - 在 permissions 块声明 workflows 无效（该权限名不在 schema 中）
+      #     - 将仓库 Actions 默认权限改为 Read and write 无效
+      #     - 推送到特性分支再开 PR 同样被拒
       #   这是 GitHub 防止 Actions 自我提权的机制。
       #
-      # 因此改为推送到独立分支并开 PR，由仓库管理员审核合并：
-      #   合并 PR -> 由人工动作改动 workflow 文件，符合 GitHub 的权限模型
-      #   引用：https://github.com/orgs/community/discussions/25266
-      #
-      # 若不想每次合并 PR，可给本工作流配置带 workflow 权限的 PAT
-      # （存为 secret 并 checkout 时使用），即可恢复直接 push。
+      # SYNC_TOKEN 需为细粒度 PAT，权限：
+      #   Contents : Read and write
+      #   Workflows: Read and write
+      # 配置路径：仓库 Settings -> Secrets and variables -> Actions
       # ----------------------------------------------------------
-      - name: "[4] 提交变更（创建 PR）"
+      - name: "[4] 提交变更"
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
         run: |
           echo "=========================================="
           echo "  提交变更"
           echo "=========================================="
 
           if git diff --quiet; then
-            echo "[OK] 无变化，跳过"
+            echo "[OK] 无变化，跳过提交"
             exit 0
+          fi
+
+          LATEST=$(head -1 tags.txt)
+
+          # 未配置 PAT：给出明确指引，而不是无意义地失败
+          if [ -z "$SYNC_TOKEN" ]; then
+            CURRENT=$(sed -n '/^      tag:/,/^      cache_enabled:/p' .github/workflows/AutoBuild.yml \
+              | grep '^          - ' | sed 's/^          - //' | tr -d '"' | tr '\n' ' ')
+            DESIRED=$(printf 'latest %s' "$(head -n "$KEEP_COUNT" tags.txt | tr '\n' ' ')")
+
+            echo ""
+            echo "::error::未配置 SYNC_TOKEN，无法提交对工作流文件的修改"
+            echo ""
+            echo "【为什么需要】"
+            echo "  GitHub 不允许默认 GITHUB_TOKEN 修改 .github/workflows/ 下的文件"
+            echo "  （防止 Actions 自我提权），该限制无法通过仓库设置绕过。"
+            echo ""
+            echo "【配置步骤】"
+            echo "  1. 打开 https://github.com/settings/personal-access-tokens/new"
+            echo "  2. Repository access 仅选 AutoBuild-ImmortalWrt"
+            echo "  3. Permissions 勾选："
+            echo "       Contents  : Read and write"
+            echo "       Workflows : Read and write"
+            echo "  4. 生成后复制 token"
+            echo "  5. 打开 https://github.com/lmwm/AutoBuild-ImmortalWrt/settings/secrets/actions"
+            echo "  6. New repository secret，名称 SYNC_TOKEN，值粘贴 token"
+            echo ""
+            echo "【本次应更新的内容】"
+            echo "  上游最新: ${LATEST}"
+            echo "  当前选项: ${CURRENT}"
+            echo "  期望选项: ${DESIRED}"
+            echo ""
+            echo "（配置 SYNC_TOKEN 后重跑本工作流即可自动完成）"
+            exit 1
           fi
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          LATEST=$(head -1 tags.txt)
-          BRANCH="sync-versions"
-
-          echo "变更内容预览:"
-          git --no-pager diff --stat
-
-          # 推送到独立分支（分支内容不受 workflows 权限限制）
-          git checkout -B "$BRANCH"
           git add .github/workflows/AutoBuild.yml
           git commit -m "配置: 同步 ImmortalWrt 版本标签（最新 ${LATEST}）"
 
-          echo "[OK] 已提交，推送分支 ${BRANCH}"
+          echo "[OK] 已提交，开始推送"
           for attempt in 1 2 3; do
-            if git push -f origin "$BRANCH"; then
-              echo "[OK] 分支推送成功（第 ${attempt} 次尝试）"
-              break
+            # 注意：不能用 `if git push ... | sed ...`，那判断的是 sed 的退出码，
+            # 会把推送失败误判为成功。这里直接判断 git 的退出码。
+            # 凭证来自 [1] checkout 注入的 SYNC_TOKEN，无需在此重复传递。
+            if git push origin HEAD:main; then
+              echo "[OK] 推送成功（第 ${attempt} 次尝试）"
+              exit 0
             fi
-            echo "[WARN] 分支推送失败，10 秒后重试（第 ${attempt}/3 次）"
+            echo "[WARN] 推送失败，10 秒后重试（第 ${attempt}/3 次）"
             sleep 10
-            if [ "$attempt" = "3" ]; then
-              echo "::error::分支推送失败，已重试 3 次"
-              exit 1
-            fi
           done
 
-          # 复用已存在的 PR，避免重复创建
-          PR_EXISTS=$(gh pr list --head "$BRANCH" --state open --json number --jq 'length' 2>/dev/null || echo "0")
-          if [ "$PR_EXISTS" != "0" ]; then
-            echo "[OK] 已存在打开的 PR，分支已更新，无需重复创建"
-            gh pr list --head "$BRANCH" --state open
-            exit 0
-          fi
+          echo "::error::推送失败，已重试 3 次"
+          exit 1
 
-          gh pr create \
-            --base main \
-            --head "$BRANCH" \
-            --title "配置: 同步 ImmortalWrt 版本标签（最新 ${LATEST}）" \
-            --body-file - <<EOF
-          本 PR 由「同步版本标签」工作流自动生成。
-
-          ## 变更内容
-
-          更新 AutoBuild.yml 中 tag 的下拉列表，最新版本为 ${LATEST}。
-
-          ## 为什么是 PR 而不是直接提交
-
-          GitHub 禁止 GITHUB_TOKEN 直接修改 .github/workflows/ 下的文件（防止 Actions 自我提权），因此改为提交 PR，由人工合并。
-
-          ## 合并方式
-
-          确认版本列表无误后合并本 PR，编译工作流的下拉选项即会更新。
-          EOF
-
-          echo "[OK] PR 已创建"
