@@ -1,0 +1,122 @@
+#
+# 同步版本标签
+# 仓库：https://github.com/lmwm/AutoBuild-ImmortalWrt
+#
+# 目的：让 AutoBuild.yml 中 tag 的下拉选项保持最新，避免手动输入版本号出错。
+#
+# 背景：GitHub Actions 的 workflow_dispatch 下拉选项（type: choice）必须在
+#       工作流文件中静态列出，官方不支持在运行时动态生成。因此这里用定时
+#       工作流从上游拉取标签，自动改写 AutoBuild.yml 的 options 并提交。
+#
+# 行为：
+#   - 每周一 03:00 UTC 自动运行，也可手动触发
+#   - 拉取上游全部正式标签（排除 -rc 等预发布版本）
+#   - 保留最新的 KEEP_COUNT 个，重新写入 AutoBuild.yml 的 tag.options
+#   - 无变化则不产生提交
+#
+# 实际改写逻辑见 .github/scripts/SyncTags.py
+#
+# 注意：GitHub 对长期无活动的仓库会停用定时工作流。本仓库会持续触发编译，
+#       通常不会遇到；若发现下拉列表长期未更新，手动触发本工作流即可。
+#
+
+name: "同步版本标签"
+
+on:
+  schedule:
+    # 每周一 03:00 UTC（北京时间 11:00）
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+
+env:
+  # 下拉列表中保留的历史版本数量
+  KEEP_COUNT: 8
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    name: "同步版本标签"
+    timeout-minutes: 15
+
+    steps:
+      - name: "[1] 克隆配置仓库"
+        uses: actions/checkout@v4
+
+      - name: "[2] 获取上游版本标签"
+        run: |
+          echo "=========================================="
+          echo "  获取 ImmortalWrt 版本标签"
+          echo "=========================================="
+
+          UPSTREAM="https://github.com/immortalwrt/immortalwrt.git"
+
+          for attempt in 1 2 3; do
+            if git ls-remote --tags --sort=-v:refname "$UPSTREAM" > tags_raw.txt 2>/dev/null; then
+              # 只保留形如 v25.12.1 的正式版本，排除 -rc / -beta 等预发布
+              grep -oP 'refs/tags/\Kv[0-9.]+$' tags_raw.txt | awk '!seen[$0]++' > tags.txt || true
+              if [ -s tags.txt ]; then
+                echo "[OK] 标签获取成功（第 ${attempt} 次尝试）"
+                break
+              fi
+            fi
+            echo "[WARN] 获取标签失败，5 秒后重试（第 ${attempt}/3 次）"
+            sleep 5
+          done
+
+          if [ ! -s tags.txt ]; then
+            echo "::error::无法从上游获取版本标签"
+            exit 1
+          fi
+
+          TOTAL=$(wc -l < tags.txt)
+          echo "[OK] 上游共有 ${TOTAL} 个正式版本，最新在前:"
+          sed 's/^/  - /' tags.txt | head -20
+
+      - name: "[3] 更新 AutoBuild.yml 的下拉选项"
+        run: |
+          echo "=========================================="
+          echo "  更新 AutoBuild.yml 选项"
+          echo "=========================================="
+
+          python3 .github/scripts/SyncTags.py \
+            .github/workflows/AutoBuild.yml \
+            tags.txt \
+            "$KEEP_COUNT"
+
+          echo ""
+          echo "更新后的选项预览:"
+          sed -n '/^      tag:/,/^      cache_enabled:/p' .github/workflows/AutoBuild.yml
+
+      - name: "[4] 提交变更"
+        run: |
+          echo "=========================================="
+          echo "  提交变更"
+          echo "=========================================="
+
+          if git diff --quiet; then
+            echo "[OK] 无变化，跳过提交"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          LATEST=$(head -1 tags.txt)
+          git add .github/workflows/AutoBuild.yml
+          git commit -m "配置: 同步 ImmortalWrt 版本标签（最新 ${LATEST}）"
+
+          echo "[OK] 已提交，开始推送"
+          for attempt in 1 2 3; do
+            if git push; then
+              echo "[OK] 推送成功（第 ${attempt} 次尝试）"
+              exit 0
+            fi
+            echo "[WARN] 推送失败，10 秒后重试（第 ${attempt}/3 次）"
+            sleep 10
+          done
+
+          echo "::error::推送失败，已重试 3 次"
+          exit 1

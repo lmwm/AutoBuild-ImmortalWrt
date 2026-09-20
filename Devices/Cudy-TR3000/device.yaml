@@ -1,0 +1,13 @@
+# Cudy TR3000 设备配置
+# 目录名：Devices/Cudy-TR3000（去空格）
+# 下拉显示名：Cudy TR3000（工作流会去掉空格后定位本目录）
+# 此文件定义设备相关的编译参数，由 AutoBuild.yml 读取
+
+# 设备型号（用于固件命名）
+model: "Cudy TR3000"
+
+# 自定义软件包列表文件
+packages_list: "packages.yaml"
+
+# 设备 TARGET（用于 make defconfig）
+target: "CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-v1-ubootmod=y"

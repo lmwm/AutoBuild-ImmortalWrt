@@ -1,0 +1,78 @@
+# Cudy TR3000 自定义软件包配置
+# 工作流会根据此配置自动生成 .config
+# 依赖会由 make defconfig 自动处理
+
+# 启用的包
+enable:
+  # LuCI 中文支持
+  - luci-i18n-base-zh-cn
+
+  # LuCI 主题
+  - luci-theme-argon
+
+  # LuCI 应用
+  - luci-app-autoreboot
+  - luci-app-mwan3
+  - luci-app-ttyd
+  # - luci-app-upnp
+  - luci-app-wol
+  - luci-app-openclash
+  - luci-app-harbor-file
+  - luci-mod-dashboard
+  - luci-app-argon-config
+
+  # 应用过滤（OpenAppFilter）
+  # 依赖链：luci-app-oaf -> appfilter + kmod-oaf
+  # 其中 kmod-oaf 由 packages.sh 克隆并打补丁后提供，详见该脚本
+  # appfilter 的 C 依赖（libubox/libuci/libjson-c 等）由 make defconfig 自动解析
+  - luci-app-oaf
+
+  # 网络工具
+  - etherwake
+  - wakeonlan
+  - openssh-sftp-server
+  - usbutils
+
+  # 内核模块
+  - kmod-mtd-rw
+  - kmod-usb-net-cdc-ncm
+  - kmod-usb-net-cdc-mbim
+  - kmod-usb-net-cdc-ether
+  - kmod-usb-net-qmi-wwan
+  - kmod-usb-net-cdc-eem
+  - kmod-usb2
+  - kmod-usb-net-rndis
+  - kmod-vrf
+  - kmod-bonding
+  - kmod-ipt-fullconenat
+  - kmod-ipt-nat
+  - kmod-ipt-conntrack
+
+  # 其他工具
+  - wget-ssl
+  - libpcre2
+
+# 禁用的包（本体）
+disable:
+  - luci-app-passwall
+  - luci-app-rclone
+
+# 禁用的子组件（按需添加）
+disable_components:
+  luci-app-passwall:
+    - INCLUDE_Haproxy
+    - INCLUDE_Hysteria
+    - INCLUDE_NaiveProxy
+    - INCLUDE_Shadowsocks_Rust_Client
+    - INCLUDE_Shadowsocks_Rust_Server
+    - INCLUDE_Shadow_TLS
+    - INCLUDE_Simple_Obfs
+    - INCLUDE_SingBox
+    - INCLUDE_V2ray_Geodata
+    - INCLUDE_V2ray_Geoview
+    - INCLUDE_V2ray_Plugin
+    - INCLUDE_Xray
+    - INCLUDE_Xray_Plugin
+  luci-app-rclone:
+    - INCLUDE_rclone-webui
+    - INCLUDE_rclone-ng

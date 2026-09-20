@@ -1,0 +1,26 @@
+# DSH 运行期临时凭证文件（由工具链自动生成，含明文凭证，绝不可提交）
+# 文件名形如 UsersDHAppDataLocalTempdsh-XXXXXXgit-credentials
+*git-credentials
+*dsh-*/
+
+# 通用凭证与密钥文件
+*.pem
+*.key
+id_rsa*
+.git-credentials
+.netrc
+
+# 编译产物与临时文件
+firmware/
+generated_configs/
+tags.txt
+tags_raw.txt
+config_diff_report.txt
+*.log
+
+# 编辑器与系统文件
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
