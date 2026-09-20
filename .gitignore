@@ -6,9 +6,21 @@
 # 通用凭证与密钥文件
 *.pem
 *.key
+*.token
+*.secret
+*.p12
+*.pfx
 id_rsa*
+id_ed25519*
+id_ecdsa*
 .git-credentials
 .netrc
+credentials.json
+token.json
+secrets.json
+.env
+.env.*
+!.env.example
 
 # 编译产物与临时文件
 firmware/

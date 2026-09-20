@@ -130,6 +130,52 @@ jobs:
           echo "  提交变更"
           echo "=========================================="
 
+          # ----------------------------------------------------------
+          # 防呆守卫：阻止将来的调试语句把 SYNC_TOKEN 写进公开日志
+          #
+          # 本仓库是 public，运行日志任何人可见。GitHub 只遮蔽「注册 secret
+          # 的原始值」，对拼接或编码后的派生值无效，所以最稳的做法是让这类
+          # 语句压根进不了执行路径。
+          #
+          # 实现说明：检查目标以变量拼接给出（而非字面量），因此这段守卫
+          # 代码本身不会撞上自己的检测规则。
+          # ----------------------------------------------------------
+          SCRIPT_PATH="$GITHUB_WORKSPACE/.github/workflows/SyncVersions.yml"
+          K_ENV="e""nv"
+          K_PE="print""env"
+          V_TOK='$''SYNC_TOKEN'
+          V_GHT='$''GITHUB_TOKEN'
+
+          # 1) 立即关闭命令回显：即使有人为调试加了 set -x，此处强制关掉
+          set +x
+
+          # 2) 静态检查所有 run 块（YAML 与 shell 的注释行均跳过）
+          if awk -v e="$K_ENV" -v pe="$K_PE" -v tok="$V_TOK" -v ght="$V_GHT" '
+            /^[[:space:]]*run:[[:space:]]*\|/ { inrun=1; next }
+            inrun && !/^[[:space:]]/        { inrun=0 }
+            !inrun                          { next }
+            { line=$0; sub(/^[[:space:]]*/, "", line); if (line ~ /^#/) next }
+            /set[[:space:]]+-[a-zA-Z]*x/    { print "::error::检测到 set -x，会回显命令与环境变量"; bad=1 }
+            /set[[:space:]]+-[a-zA-Z]*o[[:space:]]+xtrace/ { print "::error::检测到 set -o xtrace"; bad=1 }
+            {
+              if (index(line, e) > 0 && line !~ /^env:/) { print "::error::检测到裸 " e " 命令，会打印全部环境变量"; bad=1 }
+              if (index(line, pe) > 0) { print "::error::检测到 " pe " 命令，会打印全部环境变量"; bad=1 }
+              if (index(line, tok) > 0 || index(line, ght) > 0) { print "::error::检测到直接展开敏感变量"; bad=1 }
+            }
+            END { exit (bad ? 1 : 0) }
+          ' "$SCRIPT_PATH"; then
+            echo "[OK] 安全自检通过"
+          else
+            echo "::error::安全自检未通过，拒绝执行（本仓库为 public，运行日志公开可见）"
+            echo "         请移除上述调试语句后重试"
+            exit 1
+          fi
+
+          # 3) 自检：确认 SYNC_TOKEN 已注入（只报长度，绝不回显内容）
+          if [ -n "$SYNC_TOKEN" ]; then
+            echo "[OK] 凭据已注入（长度 ${#SYNC_TOKEN}）"
+          fi
+
           if git diff --quiet; then
             echo "[OK] 无变化，跳过提交"
             exit 0
