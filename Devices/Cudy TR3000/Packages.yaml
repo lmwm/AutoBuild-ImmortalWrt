@@ -23,7 +23,7 @@ enable:
 
   # 应用过滤（OpenAppFilter）
   # 依赖链：luci-app-oaf -> appfilter + kmod-oaf
-  # 其中 kmod-oaf 由 packages.sh 克隆并打补丁后提供，详见该脚本
+  # 其中 kmod-oaf 由 Packages.sh 克隆并打补丁后提供，详见该脚本
   # appfilter 的 C 依赖（libubox/libuci/libjson-c 等）由 make defconfig 自动解析
   - luci-app-oaf
 

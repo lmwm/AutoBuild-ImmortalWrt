@@ -3,9 +3,10 @@
 # 仓库：https://github.com/lmwm/AutoBuild-ImmortalWrt
 #
 # 编译工作流，通过 device 参数选择设备
-# 设备参数从 Devices/<device>/device.yaml 读取
-# 自定义包从 Devices/<device>/packages.yaml 读取
-# 设备定制从 Devices/<device>/customize.sh 执行
+# 设备参数从 Devices/<设备名>/Device.yaml 读取
+# 自定义包从 Devices/<设备名>/Packages.yaml 读取
+# 自定义包脚本 Devices/<设备名>/Packages.sh
+# 设备定制从 Devices/<设备名>/Customize.sh 执行
 # 版本标签为下拉选择，选项由「同步版本标签」（SyncVersions.yml）工作流定期维护
 #
 
@@ -141,20 +142,24 @@ jobs:
         id: device
         run: |
           DEVICE="${{ inputs.device }}"
-          # 下拉选项为可读名称（如 "Cudy TR3000"），对应目录名把空格换成连字符
-          # 例："Cudy TR3000" -> "Cudy-TR3000"
-          DEVICE_DIR_NAME=$(echo "$DEVICE" | tr ' ' '-')
-          CONF="Devices/${DEVICE_DIR_NAME}/device.yaml"
+          # 下拉选项值即目录名（含空格，如 "Cudy TR3000"）
+          DEVICE_DIR="Devices/${DEVICE}"
+          CONF="${DEVICE_DIR}/Device.yaml"
 
           if [ ! -f "$CONF" ]; then
             echo "::error::设备配置不存在: $CONF"
             exit 1
           fi
 
-          # 解析 YAML 配置（正确处理带空格的值）
-          DEVICE_MODEL=$(grep 'model:' "$CONF" | sed 's/model: *//' | tr -d '"' | tr -d "'")
-          PACKAGES_LIST=$(grep 'packages_list:' "$CONF" | sed 's/packages_list: *//' | tr -d '"' | tr -d "'")
-          DEVICE_TARGET=$(grep 'target:' "$CONF" | sed 's/target: *//' | tr -d '"' | tr -d "'")
+          # 解析 YAML 配置（键名首字母大写；用 sed 而非 awk，避免带空格的值被截断）
+          DEVICE_MODEL=$(grep '^Model:' "$CONF" | sed 's/^Model: *//' | tr -d '"' | tr -d "'")
+          PACKAGES_LIST=$(grep '^Packages_list:' "$CONF" | sed 's/^Packages_list: *//' | tr -d '"' | tr -d "'")
+          DEVICE_TARGET=$(grep '^Target:' "$CONF" | sed 's/^Target: *//' | tr -d '"' | tr -d "'")
+
+          if [ -z "$DEVICE_MODEL" ] || [ -z "$DEVICE_TARGET" ]; then
+            echo "::error::${CONF} 缺少 Model 或 Target 字段"
+            exit 1
+          fi
 
           # 从 TARGET 推导平台标识，用于缓存键隔离（不同平台的产物不可混用）
           # CONFIG_TARGET_mediatek_filogic_DEVICE_xxx=y -> mediatek-filogic
@@ -170,8 +175,7 @@ jobs:
             exit 1
           fi
 
-          echo "device_dir=Devices/${DEVICE_DIR_NAME}" >> $GITHUB_OUTPUT
-          echo "device_dir_name=${DEVICE_DIR_NAME}" >> $GITHUB_OUTPUT
+          echo "device_dir=${DEVICE_DIR}" >> $GITHUB_OUTPUT
           echo "model=${DEVICE_MODEL}" >> $GITHUB_OUTPUT
           echo "packages_list=${PACKAGES_LIST}" >> $GITHUB_OUTPUT
           echo "target=${DEVICE_TARGET}" >> $GITHUB_OUTPUT
@@ -181,7 +185,7 @@ jobs:
           echo "  设备配置"
           echo "=========================================="
           echo "  设备: ${DEVICE}"
-          echo "  设备目录: Devices/${DEVICE_DIR_NAME}"
+          echo "  设备目录: ${DEVICE_DIR}"
           echo "  型号: ${DEVICE_MODEL}"
           echo "  包列表: ${PACKAGES_LIST}"
           echo "  平台: ${PLATFORM_SLUG}"
@@ -327,11 +331,11 @@ jobs:
       - name: "[3.1] 添加自定义软件包"
         run: |
           DEVICE_DIR="${{ steps.device.outputs.device_dir }}"
-          if [ -f "${DEVICE_DIR}/packages.sh" ]; then
-            chmod +x "${DEVICE_DIR}/packages.sh"
-            cd immortalwrt && bash "${GITHUB_WORKSPACE}/${DEVICE_DIR}/packages.sh"
+          if [ -f "${DEVICE_DIR}/Packages.sh" ]; then
+            chmod +x "${DEVICE_DIR}/Packages.sh"
+            cd immortalwrt && bash "${GITHUB_WORKSPACE}/${DEVICE_DIR}/Packages.sh"
           else
-            echo "[INFO] 无 packages.sh，跳过"
+            echo "[INFO] 无 Packages.sh，跳过"
           fi
 
       # ----------------------------------------------------------
@@ -340,9 +344,9 @@ jobs:
       - name: "[3.2] 设备定制"
         run: |
           DEVICE_DIR="${{ steps.device.outputs.device_dir }}"
-          if [ -f "${DEVICE_DIR}/customize.sh" ]; then
-            chmod +x "${DEVICE_DIR}/customize.sh"
-            cd immortalwrt && bash "${GITHUB_WORKSPACE}/${DEVICE_DIR}/customize.sh"
+          if [ -f "${DEVICE_DIR}/Customize.sh" ]; then
+            chmod +x "${DEVICE_DIR}/Customize.sh"
+            cd immortalwrt && bash "${GITHUB_WORKSPACE}/${DEVICE_DIR}/Customize.sh"
           else
             echo "[INFO] 无设备定制脚本，跳过"
           fi
@@ -369,7 +373,7 @@ jobs:
             touch immortalwrt/.config
           fi
 
-          # 如果存在 packages.yaml，解析启用和禁用的包
+          # 如果存在 Packages.yaml，解析启用和禁用的包
           if [ -n "$PACKAGES_LIST" ] && [ -f "${DEVICE_DIR}/${PACKAGES_LIST}" ]; then
             PACKAGES_FILE="${DEVICE_DIR}/${PACKAGES_LIST}"
 
@@ -620,9 +624,9 @@ jobs:
           MODEL="${{ steps.device.outputs.model }}"
           VERSION="${{ steps.version.outputs.tag }}"
           VERSION_RAW="${VERSION#v}"
-          # 设备标识：空格换连字符，仅用于 Artifact 名称（下载的 zip 文件名）
-          # 与设备目录名规则保持一致（Cudy TR3000 -> Cudy-TR3000）
-          DEVICE_ID=$(echo "$MODEL" | tr ' ' '-' | tr -cd 'A-Za-z0-9._-')
+          # 设备标识：去掉空格，仅用于 Artifact 名称（下载的 zip 文件名不带空格）
+          # 固件文件名保留型号原有空格（Cudy TR3000-...）
+          DEVICE_ID=$(echo "$MODEL" | tr -d ' ' | tr -cd 'A-Za-z0-9._-')
           BUILD_ID=$(head -1 immortalwrt/version 2>/dev/null || echo "unknown")
           DATE_STR=$(date +%Y%m%d)
           STAGE_DIR="$GITHUB_WORKSPACE/firmware"

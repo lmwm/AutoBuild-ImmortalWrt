@@ -2,6 +2,7 @@
 #
 # Cudy TR3000 自定义软件包
 # 此脚本在 feeds install 之后、make defconfig 之前执行
+# 由 AutoBuild.yml 的 [3.1] 步骤调用
 #
 # 用法：在 immortalwrt 源码根目录下执行
 #
@@ -45,7 +46,7 @@ echo "[OK] 已添加: OpenClash (luci-app-openclash)"
 #   luci-app-oaf  -> LuCI 界面（依赖 appfilter + kmod-oaf）
 #   appfilter     -> oafd 用户态服务程序
 #   kmod-oaf      -> oaf 内核模块（Netfilter 扩展，依赖 kmod-ipt-conntrack）
-# 三者都启用才能工作，packages.yaml 中只写 luci-app-oaf 即可，
+# 三者都启用才能工作，Packages.yaml 中只写 luci-app-oaf 即可，
 # make defconfig 会通过依赖关系自动选中 appfilter 与 kmod-oaf。
 # -----------------------------------------------------------
 find "$OPENWRT_DIR/package/feeds/" -name "luci-app-oaf" -exec rm -rf {} + 2>/dev/null
@@ -77,7 +78,7 @@ if [ -f "$OAF_MAKEFILE" ]; then
     if grep -q 'Wno-error=strict-prototypes' "$OAF_MAKEFILE"; then
         echo "[OK] oaf 内核模块补丁已存在，跳过"
     else
-        printf '\n# 由 packages.sh 追加：降级 6.12 内核 clang 下的 -Wstrict-prototypes\nKCFLAGS += -Wno-error=strict-prototypes\n' >> "$OAF_MAKEFILE"
+        printf '\n# 由 Packages.sh 追加：降级 6.12 内核 clang 下的 -Wstrict-prototypes\nKCFLAGS += -Wno-error=strict-prototypes\n' >> "$OAF_MAKEFILE"
         if grep -q 'Wno-error=strict-prototypes' "$OAF_MAKEFILE"; then
             echo "[OK] 已修补 oaf 内核模块: 补充 -Wno-error=strict-prototypes"
             tail -3 "$OAF_MAKEFILE"

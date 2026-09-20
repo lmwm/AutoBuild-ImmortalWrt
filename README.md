@@ -14,11 +14,11 @@
 │   ├── AutoBuild.yml          # 编译工作流
 │   └── SyncVersions.yml       # 版本标签同步工作流（定期维护下拉选项）
 ├── Devices/                   # 设备目录（每个设备一个文件夹）
-│   └── Cudy-TR3000/           # 目录名把空格换成连字符；下拉显示名仍为 "Cudy TR3000"
-│       ├── device.yaml        # 设备参数（型号、TARGET）
-│       ├── packages.yaml      # 软件包配置（启用/禁用）
-│       ├── packages.sh        # 自定义软件包脚本（克隆外部仓库）
-│       └── customize.sh       # 设备定制脚本（修改 DTS 等）
+│   └── Cudy TR3000/           # 目录名与 device 下拉选项值完全一致（含空格）
+│       ├── Device.yaml        # 设备参数（型号、TARGET）
+│       ├── Packages.yaml      # 软件包配置（启用/禁用）
+│       ├── Packages.sh        # 自定义软件包脚本（克隆外部仓库）
+│       └── Customize.sh       # 设备定制脚本（修改 DTS 等）
 ├── README.md
 └── .gitignore
 ```
@@ -35,7 +35,7 @@
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
-| `device` | 目标设备（下拉选择，决定 `Devices/<名>` 目录） | `Cudy TR3000` |
+| `device` | 目标设备（下拉选择，值与 `Devices/<名>` 目录名一致） | `Cudy TR3000` |
 | `tag` | ImmortalWrt 版本标签（下拉选择） | `latest` |
 | `cache_enabled` | 启用编译缓存（ccache + 源码下载 dl） | `true` |
 | `disk_cleanup` | 启用磁盘空间清理 | `false` |
@@ -95,9 +95,9 @@
   [2.6] 安装 feeds
 
 阶段 3: 自定义固件
-  [3.1] 添加自定义软件包（packages.sh）
-  [3.2] 设备定制（customize.sh）
-  [3.3] 生成编译配置（packages.yaml）
+  [3.1] 添加自定义软件包（Packages.sh）
+  [3.2] 设备定制（Customize.sh）
+  [3.3] 生成编译配置（Packages.yaml）
   [3.4] 恢复 ccache 缓存（可选）
   [3.5] 恢复源码下载缓存（可选）
   [3.6] 同步配置（make defconfig）
@@ -118,22 +118,22 @@
 
 ## 配置文件说明
 
-### device.yaml
+### Device.yaml
 
-设备配置文件，定义设备的基本参数：
+设备配置文件，定义设备的基本参数（键名首字母大写）：
 
 ```yaml
-# 设备型号（用于固件命名）
-model: "Cudy TR3000"
+# 设备型号（用于固件命名与 Artifact 命名）
+Model: "Cudy TR3000"
 
 # 自定义软件包列表文件
-packages_list: "packages.yaml"
+Packages_list: "Packages.yaml"
 
 # 设备 TARGET（用于 make defconfig）
-target: "CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-v1-ubootmod=y"
+Target: "CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-v1-ubootmod=y"
 ```
 
-### packages.yaml
+### Packages.yaml
 
 软件包配置文件，管理启用和禁用的包：
 
@@ -165,7 +165,7 @@ disable_components:
 
 > `usbutils` 提供 `lsusb` 命令，用于查看 USB 设备信息（调试 USB 网卡/RNDIS 时常用）。
 
-### packages.sh
+### Packages.sh
 
 克隆外部仓库的脚本（从 GitHub 获取最新版本），并对外部包打必要补丁：
 
@@ -184,7 +184,7 @@ echo "[OK] 已添加: OpenClash"
 
 #### OpenAppFilter 内核模块补丁
 
-`packages.sh` 除了克隆 [OpenAppFilter](https://github.com/destan19/OpenAppFilter)，还会修补其 `oaf/Makefile`。
+`Packages.sh` 除了克隆 [OpenAppFilter](https://github.com/destan19/OpenAppFilter)，还会修补其 `oaf/Makefile`。
 
 该仓库提供三个包，三者都启用才能工作：
 
@@ -194,7 +194,7 @@ echo "[OK] 已添加: OpenClash"
 | `appfilter` | `oafd` 用户态服务程序 | `libubox`、`libuci`、`libjson-c` 等 |
 | `kmod-oaf` | oaf 内核模块 | `kmod-ipt-conntrack` |
 
-因此 `packages.yaml` 中只需写 `luci-app-oaf`，`make defconfig` 会自动通过依赖链选中另外两个。
+因此 `Packages.yaml` 中只需写 `luci-app-oaf`，`make defconfig` 会自动通过依赖链选中另外两个。
 
 **为什么需要补丁**：OpenWrt/ImmortalWrt 25.12 起内核为 6.12，使用 clang 编译并把 `-Wstrict-prototypes` 等告警视为错误，而 `oaf/src/k_json.c` 存在大量 `cJSON *func()` 形式的无原型声明，编译时直接报错：
 
@@ -213,7 +213,7 @@ KCFLAGS += -Wno-error=strict-prototypes
 
 > 注意：这仅是**编译期**修复。上游该模块在新内核上另有运行时风险（issue #372：6.12 内核下 `memcpy` 缓冲区溢出可触发内核 panic），是否长期启用请自行评估。
 
-### customize.sh
+### Customize.sh
 
 设备定制脚本（修改 DTS、内核配置等）：
 
@@ -234,23 +234,23 @@ fi
 
 ### 1. 创建设备目录
 
-目录名**把空格换成连字符**（下拉显示名 `NanoPi R4S` 对应的目录是 `NanoPi-R4S`）：
+目录名**与下拉选项值完全一致（保留空格）**：
 
 ```bash
-mkdir -p "Devices/NanoPi-R4S"
+mkdir -p "Devices/NanoPi R4S"
 ```
 
-对应关系：工作流取 `device` 下拉值后执行 `tr ' ' '-'`，再定位目录，所以 `Cudy TR3000` -> `Devices/Cudy-TR3000`。新增设备时按此规则命名目录即可，无需额外注册。
+工作流直接用 `device` 下拉值拼路径（`Devices/${DEVICE}`），所以目录名必须与选项值一字不差（含空格）。新增设备时保持一致即可，无需额外注册。
 
-### 2. 创建 device.yaml
+### 2. 创建 Device.yaml
 
 ```yaml
-model: "NanoPi R4S"
-packages_list: "packages.yaml"
-target: "CONFIG_TARGET_rockchip_armv8_DEVICE_friendlyarm_nanopi-r4s=y"
+Model: "NanoPi R4S"
+Packages_list: "Packages.yaml"
+Target: "CONFIG_TARGET_rockchip_armv8_DEVICE_friendlyarm_nanopi-r4s=y"
 ```
 
-### 3. 创建 packages.yaml
+### 3. 创建 Packages.yaml
 
 ```yaml
 enable:
@@ -262,7 +262,7 @@ disable:
   - luci-app-passwall
 ```
 
-### 4. 编写 packages.sh（可选）
+### 4. 编写 Packages.sh（可选）
 
 ```bash
 #!/bin/bash
@@ -273,7 +273,7 @@ git clone --depth 1 https://github.com/vernesong/OpenClash.git \
     "$OPENWRT_DIR/package/app/OpenClash"
 ```
 
-### 5. 编写 customize.sh（可选）
+### 5. 编写 Customize.sh（可选）
 
 ```bash
 #!/bin/bash
@@ -305,14 +305,14 @@ device:
 
 ## 输出文件
 
-编译完成后会上传 4 个 Artifact。Artifact 名称把设备型号中的**空格换成连字符**（如 `Cudy-TR3000`），避免下载的 zip 文件名带空格；下载后的压缩包名即 `<Artifact 名称>.zip`。
+编译完成后会上传 4 个 Artifact。Artifact 名称把设备型号中的**空格去掉**（如 `CudyTR3000`），避免下载的 zip 文件名带空格；下载后的压缩包名即 `<Artifact 名称>.zip`。
 
 | Artifact | 下载后文件名 | 内容 |
 |----------|--------------|------|
-| `...-sysupgrade` | `ImmortalWrt-Cudy-TR3000-v25.12.1-sysupgrade.zip` | 系统升级固件（匹配 `*sysupgrade*`） |
-| `...-recovery` | `ImmortalWrt-Cudy-TR3000-v25.12.1-recovery.zip` | 恢复/工厂固件（匹配 `*recovery*`、`*factory*`），无此产物时跳过 |
-| `...-config` | `ImmortalWrt-Cudy-TR3000-v25.12.1-config.zip` | 编译配置，文件名为 `设备型号-ImmortalWrt-V版本-构建号-config-日期.config` |
-| `...-full` | `ImmortalWrt-Cudy-TR3000-v25.12.1-full.zip` | **完整编译产物**（见下） |
+| `...-sysupgrade` | `ImmortalWrt-CudyTR3000-v25.12.1-sysupgrade.zip` | 系统升级固件（匹配 `*sysupgrade*`） |
+| `...-recovery` | `ImmortalWrt-CudyTR3000-v25.12.1-recovery.zip` | 恢复/工厂固件（匹配 `*recovery*`、`*factory*`），无此产物时跳过 |
+| `...-config` | `ImmortalWrt-CudyTR3000-v25.12.1-config.zip` | 编译配置，文件名为 `设备型号-ImmortalWrt-V版本-构建号-config-日期.config` |
+| `...-full` | `ImmortalWrt-CudyTR3000-v25.12.1-full.zip` | **完整编译产物**（见下） |
 
 其中 `-full` 上传的是编译产物目录（`bin/targets/<平台>/`）内的**全部文件**，而不是单独的几个固件，包含：
 
@@ -326,7 +326,7 @@ device:
 已重命名的固件统一格式为 `设备型号-ImmortalWrt-V版本-构建号-类型-日期.扩展名`，例如
 `Cudy TR3000-ImmortalWrt-V25.12.1-r1234-abcd123-squashfs-sysupgrade-20260101.itb`。
 
-设备型号保留原有空格（如 `Cudy TR3000`）；仅在 Artifact 名称中把空格换成连字符（`Cudy-TR3000`），避免下载的 zip 文件名带空格。
+设备型号保留原有空格（如 `Cudy TR3000`）；仅在 Artifact 名称中去掉空格（`CudyTR3000`），避免下载的 zip 文件名带空格。
 
 支持的固件格式：`.itb`、`.bin`、`.img.gz`、`.squashfs`
 

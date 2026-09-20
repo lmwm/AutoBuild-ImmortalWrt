@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Cudy TR3000 设备定制脚本
-# 在 packages.sh 和 generate-config 之后执行
+# 在 Packages.sh 之后执行
 #
 # 功能：修改设备特定设置（DTS、内核配置等）
 #
