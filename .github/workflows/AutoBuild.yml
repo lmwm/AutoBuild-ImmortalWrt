@@ -23,7 +23,7 @@ on:
         default: "Cudy TR3000"
         required: true
       tag:
-        description: "ImmortalWrt 版本标签（列表由 Sync Version Tags 工作流定期同步，无需手输）"
+        description: "ImmortalWrt 版本标签（列表由「同步版本标签」工作流定期维护，无需手输）"
         type: choice
         options:
           - latest
