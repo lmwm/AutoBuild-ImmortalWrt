@@ -27,10 +27,14 @@ on:
         type: choice
         options:
           - latest
+          - "v25.12.2"
           - "v25.12.1"
           - "v25.12.0"
           - "v24.10.6"
           - "v24.10.5"
+          - "v24.10.4"
+          - "v24.10.3"
+          - "v24.10.2"
         default: latest
         required: true
       cache_enabled:
