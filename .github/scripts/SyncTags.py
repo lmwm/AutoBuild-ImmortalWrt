@@ -23,7 +23,9 @@ OPTIONS_KEY = '        options:\n'
 ITEM_INDENT = '          '
 
 # 所有输入项名称，用于校验更新后没有丢项
-EXPECTED_INPUTS = ('device', 'tag', 'cache_enabled', 'disk_cleanup', 'skip_compile')
+# 注意：此列表必须与 AutoBuild.yml 的 workflow_dispatch.inputs 保持一致，
+#       增删输入项时需同步修改，否则本脚本会在写回校验时失败退出。
+EXPECTED_INPUTS = ('device', 'tag', 'cache_enabled', 'skip_compile')
 
 
 def build_pattern():
