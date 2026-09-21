@@ -65,13 +65,16 @@ echo "[OK] 已添加: OpenAppFilter (luci-app-oaf)"
 #       导致 kmod-oaf 编译失败，进而出现 "kmod-oaf (no such package)"
 #       的依赖报错（上游 issue #378，截至 master 仍存在）。
 #
-# 修复：在 Build/Compile 的 $(MAKE) 命令行末尾追加
-#       KCFLAGS="$(KCFLAGS) -Wno-error=strict-prototypes"，确保编译器
-#       收到该降级选项。
+# 修复：用 awk 找到 Makefile 中 KCFLAGS="..." 赋值行，在引号闭合前
+#       插入 -Wno-error=strict-prototypes。
 #
-# 重要：必须追加到 $(MAKE) 行而非 Makefile 末尾。$(MAKE) 行从不引用
-#       末尾追加的 KCFLAGS +=（它只用块内已有的 $(KCFLAGS)），末尾追加
-#       实际上不起作用（前版写法）。
+# 实际 Makefile 结构：
+#   $(MAKE) -C "$(LINUX_DIR)" \
+#       M="$(PKG_BUILD_DIR)" \
+#       KCFLAGS="$(KCFLAGS)" \   <-- 目标行，在引号闭合前插入
+#       modules
+#
+# 重要：$(MAKE) 和 KCFLAGS= 在不同行，不可用 sed 的 $(MAKE).*KCFLAGS 模式。
 #
 # 注意：这是编译期修复。上游该模块在新内核上另有运行时风险
 #       （issue #372：6.12 内核下 memcpy 缓冲区溢出触发内核 panic），
@@ -79,27 +82,32 @@ echo "[OK] 已添加: OpenAppFilter (luci-app-oaf)"
 # -----------------------------------------------------------
 OAF_MAKEFILE="$OPENWRT_DIR/package/app/OpenAppFilter/oaf/Makefile"
 if [ -f "$OAF_MAKEFILE" ]; then
-    # 检查是否已修补：$(MAKE) 行是否已含降级选项
-    if grep -q '\$(MAKE)' "$OAF_MAKEFILE" && \
-       sed -n '/\$(MAKE)/p' "$OAF_MAKEFILE" | grep -q 'Wno-error=strict-prototypes'; then
-        echo "[OK] oaf 内核模块补丁已存在（在 \$(MAKE) 行），跳过"
+    if grep -q 'Wno-error=strict-prototypes' "$OAF_MAKEFILE"; then
+        echo "[OK] oaf 内核模块补丁已存在，跳过"
     else
-        # 旧版遗留：删除无效的末尾追加行（补丁未放到正确位置）
+        # 旧版遗留：删除无效的末尾追加行
         if grep -q '^KCFLAGS +=' "$OAF_MAKEFILE"; then
             sed -i '/^KCFLAGS +=.*Wno-error=strict-prototypes/d' "$OAF_MAKEFILE"
             echo "[INFO] 清理旧版末尾追加行"
         fi
 
-        # 新补丁：追加到 $(MAKE) 行末尾（确保编译时生效）
-        sed -i '/\$(MAKE).*KCFLAGS/{s|$| -Wno-error=strict-prototypes|}' "$OAF_MAKEFILE"
+        # 新补丁：找到 KCFLAGS="$(KCFLAGS)" 行，在闭合引号前插入降级选项
+        awk '
+        /KCFLAGS=/ {
+            sub(/-Wno-error=strict-prototypes/, "")
+            sub(/KCFLAGS="\$\(KCFLAGS\)"/, "KCFLAGS=\"$(KCFLAGS) -Wno-error=strict-prototypes\"")
+        }
+        { print }
+        ' "$OAF_MAKEFILE" > "$OAF_MAKEFILE.tmp" && mv "$OAF_MAKEFILE.tmp" "$OAF_MAKEFILE"
 
-        if grep -q '\$(MAKE)' "$OAF_MAKEFILE" && \
-           sed -n '/\$(MAKE)/p' "$OAF_MAKEFILE" | grep -q 'Wno-error=strict-prototypes'; then
-            echo "[OK] 已修补 oaf 内核模块: 在 \$(MAKE) 行追加 -Wno-error=strict-prototypes"
-            grep '\$(MAKE)' "$OAF_MAKEFILE"
+        if grep -q 'KCFLAGS.*strict-prototypes' "$OAF_MAKEFILE"; then
+            echo "[OK] 已修补 oaf 内核模块: 在 KCFLAGS 赋值行追加 -Wno-error=strict-prototypes"
+            grep 'KCFLAGS.*strict-prototypes' "$OAF_MAKEFILE"
         else
             echo "[ERROR] oaf 内核模块补丁未生效，kmod-oaf 将编译失败"
             echo "        请检查 $OAF_MAKEFILE"
+            echo "        KCFLAGS 行内容:"
+            grep 'KCFLAGS=' "$OAF_MAKEFILE" || echo "        (未找到 KCFLAGS= 行)"
             exit 1
         fi
     fi

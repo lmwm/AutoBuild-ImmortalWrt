@@ -203,13 +203,13 @@ error: a function declaration without a prototype is deprecated
 
 这会导致 `kmod-oaf` 编译失败，进而出现 `kmod-oaf (no such package)` 的依赖报错（上游 issue #378，截至 master 仍存在）。
 
-补丁修改 `Build/Compile` 中的 `$(MAKE)` 命令行，把该告警降级为警告：
+补丁用 awk 找到 `Build/Compile` 中 `KCFLAGS="$(KCFLAGS)"` 赋值行，在引号闭合前插入降级选项：
 
-```bash
-$(MAKE) -C "$(LINUX_DIR)" ... KCFLAGS="$(KCFLAGS) -Wno-error=strict-prototypes"
+```makefile
+KCFLAGS="$(KCFLAGS) -Wno-error=strict-prototypes"
 ```
 
-注意：必须追加到 `$(MAKE)` 行，而非 Makefile 末尾。`$(MAKE)` 行从不引用末尾追加的变量，末尾追加实际上不起作用。补丁带有幂等检查与生效校验，未生效则直接报错退出。
+注意：`$(MAKE)` 和 `KCFLAGS=` 在 Makefile 中是**不同行**（`KCFLAGS` 是续行），不能用 `$(MAKE).*KCFLAGS` 模式匹配。补丁带有幂等检查与生效校验，未生效则直接报错退出。
 
 > 注意：这仅是**编译期**修复。上游该模块在新内核上另有运行时风险（issue #372：6.12 内核下 `memcpy` 缓冲区溢出可触发内核 panic），是否长期启用请自行评估。
 
