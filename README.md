@@ -194,20 +194,22 @@ echo "[OK] 已添加: OpenClash"
 
 因此 `Packages.yaml` 中只需写 `luci-app-oaf`，`make defconfig` 会自动通过依赖链选中另外两个。
 
-**为什么需要补丁**：OpenWrt/ImmortalWrt 25.12 起内核为 6.12，使用 clang 编译并把 `-Wstrict-prototypes` 等告警视为错误，而 `oaf/src/k_json.c` 存在大量 `cJSON *func()` 形式的无原型声明，编译时直接报错：
+**为什么需要补丁**：OpenWrt/ImmortalWrt 25.12 起内核为 6.12，编译时把 `-Wstrict-prototypes` 等告警视为错误，而 `oaf/src/k_json.c` 存在大量 `cJSON *func()` 形式的无原型声明，编译时直接报错：
 
 ```
 error: a function declaration without a prototype is deprecated
        in all versions of C [-Werror,-Wstrict-prototypes]
 ```
 
-这会导致 `kmod-oaf` 编译失败，进而出现 `kmod-oaf (no such package)` 的依赖报错（上游 issue #378，截至 master 仍存在）。补丁在 `oaf/Makefile` 末尾追加一行，把该告警降级为警告：
+这会导致 `kmod-oaf` 编译失败，进而出现 `kmod-oaf (no such package)` 的依赖报错（上游 issue #378，截至 master 仍存在）。
+
+补丁修改 `Build/Compile` 中的 `$(MAKE)` 命令行，把该告警降级为警告：
 
 ```bash
-KCFLAGS += -Wno-error=strict-prototypes
+$(MAKE) -C "$(LINUX_DIR)" ... KCFLAGS="$(KCFLAGS) -Wno-error=strict-prototypes"
 ```
 
-补丁带有幂等检查与生效校验，重复执行不会重复追加，未生效则直接报错退出。
+注意：必须追加到 `$(MAKE)` 行，而非 Makefile 末尾。`$(MAKE)` 行从不引用末尾追加的变量，末尾追加实际上不起作用。补丁带有幂等检查与生效校验，未生效则直接报错退出。
 
 > 注意：这仅是**编译期**修复。上游该模块在新内核上另有运行时风险（issue #372：6.12 内核下 `memcpy` 缓冲区溢出可触发内核 panic），是否长期启用请自行评估。
 
