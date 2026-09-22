@@ -37,10 +37,6 @@ on:
         description: "启用编译缓存"
         type: boolean
         default: true
-      debug_oaf_only:
-        description: "快速测试：仅编译 OpenAppFilter 三包（oaf + appfilter + luci-app-oaf），不编译完整固件"
-        type: boolean
-        default: false
       skip_compile:
         description: "跳过编译（调试模式）"
         type: boolean
@@ -539,114 +535,11 @@ jobs:
           echo "  编译固件"
           echo "=========================================="
 
-          # 快速测试模式：专项验证 kmod-oaf + OpenAppFilter 三包
-          if [ "${{ inputs.debug_oaf_only }}" = "true" ]; then
-            echo "[快速测试] 专项验证 OpenAppFilter（重点：kmod-oaf）"
-            echo ""
-
-            # ---- 第 0 步：编译 host 工具链（lua/host 依赖 sed 等） ----
-            echo "======================================================"
-            echo "  [0/2] 编译 host 工具链（tools/sed 等）"
-            echo "======================================================"
-            echo "[INFO] 快速测试直接编译单个包，跳过了 tools/toolchain 阶段"
-            echo "       lua 的 host-compile 依赖 staging_dir/host/bin/sed"
-            echo "       需要先编译 tools/sed，否则会报 No such file or directory"
-            echo ""
-            make tools/sed/compile -j$(nproc) V=s 2>&1 | tail -20
-            if [ ! -f staging_dir/host/bin/sed ]; then
-              echo "[WARN] tools/sed 未产出 sed，尝试完整 tools/install"
-              make tools/install -j$(nproc) V=s 2>&1 | tail -30
-            fi
-            if [ -f staging_dir/host/bin/sed ]; then
-              echo "[OK] host sed 已就绪: $(staging_dir/host/bin/sed --version 2>/dev/null | head -1)"
-            else
-              echo "[ERROR] host sed 仍不可用，后续 lua/host 编译必然失败"
-              exit 1
-            fi
-            echo ""
-
-            # ---- 第 1 步：专项验证 kmod-oaf（历史问题包） ----
-            echo "======================================================"
-            echo "  [1/2] 编译 kmod-oaf（内核模块，历史问题包）"
-            echo "======================================================"
-            OAF_START=$(date +%s)
-            if make package/app/OpenAppFilter/oaf/compile V=s; then
-              OAF_END=$(date +%s)
-              OAF_TIME=$((OAF_END - OAF_START))
-              echo ""
-              echo "[OK] kmod-oaf 编译成功（耗时 ${OAF_TIME}s）"
-
-              # 关键检查：之前的问题是 0.07s 跳过（Nothing to be done）
-              if [ "$OAF_TIME" -lt 5 ]; then
-                echo "[WARN] 编译耗时仅 ${OAF_TIME}s，可能被跳过！"
-                echo "       检查是否有 'Nothing to be done' 提示"
-              fi
-
-              # 产物检查：oaf.ko 必须存在
-              OAF_KO=$(find build_dir -name "oaf.ko" -path "*oaf*" 2>/dev/null | head -1)
-              if [ -n "$OAF_KO" ]; then
-                echo "[OK] oaf.ko 已生成: $OAF_KO"
-                echo "     大小: $(du -h "$OAF_KO" | cut -f1)"
-              else
-                echo "[FAIL] oaf.ko 未找到！kmod-oaf 编译未产出内核模块"
-                find build_dir -path "*oaf*" -name "*.ko" 2>/dev/null | head -5
-                exit 1
-              fi
-
-              # 产物检查：kmod-oaf-*.apk 必须存在
-              OAF_APK=$(find bin -name "kmod-oaf-*.apk" 2>/dev/null | head -1)
-              if [ -n "$OAF_APK" ]; then
-                echo "[OK] kmod-oaf APK 已生成: $OAF_APK"
-              else
-                echo "[WARN] kmod-oaf APK 未找到（可能打包阶段未执行）"
-                find bin -name "*oaf*" -o -name "*appfilter*" 2>/dev/null | head -10
-              fi
-            else
-              OAF_END=$(date +%s)
-              echo ""
-              echo "[FAIL] kmod-oaf 编译失败（耗时 $((OAF_END - OAF_START))s）"
-              echo "::error::kmod-oaf 编译失败，这是历史问题包，请查看上方完整 V=s 日志"
-              exit 1
-            fi
-
-            echo ""
-            echo "======================================================"
-            echo "  [2/2] 编译 open-app-filter + luci-app-oaf"
-            echo "======================================================"
-            FAIL=0
-            for pkg in \
-              package/app/OpenAppFilter/open-app-filter \
-              package/app/OpenAppFilter/luci-app-oaf; do
-              echo "--- 编译: $pkg ---"
-              if make "$pkg/compile" -j$(nproc) V=s 2>&1 | tail -30; then
-                echo "[OK] $pkg 编译成功"
-              else
-                echo "[FAIL] $pkg 编译失败"
-                FAIL=1
-              fi
-              echo ""
-            done
-
-            echo "=== 最终产物清单 ==="
-            echo "内核模块 (.ko):"
-            find build_dir -path "*oaf*" -name "*.ko" 2>/dev/null | head -5
-            echo ""
-            echo "APK 包:"
-            find bin -name "*oaf*" -o -name "*appfilter*" 2>/dev/null | grep -E '\.apk$' | head -10
-
-            if [ "$FAIL" = "1" ]; then
-              echo ""
-              echo "::error::open-app-filter 或 luci-app-oaf 编译失败"
-              exit 1
-            fi
-
-            echo ""
-            echo "[OK] OpenAppFilter 全部编译成功，kmod-oaf 产物已确认"
-            echo "status=success" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          # 完整编译模式
+          # 说明：这里不提供「只编译单个包」的快速测试分支。
+          #       内核模块（如 kmod-oaf）的 .built 目标依赖 $(LINUX_DIR)/.config
+          #       （见 include/kernel.mk 的 KernelPackage/depends），
+          #       必须先完成 tools -> toolchain -> target/linux 三个阶段。
+          #       只编单个包绕不过这些前置，只会产生误导性的失败。
           echo "多线程编译: -j$(nproc)"
 
           # 优先多线程；失败后降级单线程重试，最后带详细日志重试
@@ -694,9 +587,10 @@ jobs:
       # ----------------------------------------------------------
       # 5.1 整理固件
       #
-      # 产出两类内容：
+      # 产出：
       #   STAGE_DIR    暂存目录，存放重命名后的固件与配置文件，供 5.2-5.4 分类上传
-      #   ARTIFACT_DIR 原始编译产物目录，供 5.5 整目录上传
+      #   BIN_DIR      整个 bin 输出目录，供 5.5 整体上传
+      #   ARTIFACT_DIR 本平台产物目录，仅用于打印清单与健全性校验
       # ----------------------------------------------------------
       - name: "[5.1] 整理固件"
         id: organize
@@ -778,14 +672,25 @@ jobs:
           cp immortalwrt/.config "$STAGE_DIR/${MODEL}-ImmortalWrt-V${VERSION_RAW}-${BUILD_ID}-config-${DATE_STR}.config"
           echo "[FILE] .config -> ${MODEL}-ImmortalWrt-V${VERSION_RAW}-${BUILD_ID}-config-${DATE_STR}.config"
 
-          # 记录产物目录，供 5.5 整目录上传
+          # 本平台产物目录：仅用于打印清单与健全性校验
           if [ -n "$ARTIFACT_DIR" ] && [ -d "$ARTIFACT_DIR" ]; then
-            echo "[OK] 产物目录: ${ARTIFACT_DIR}"
+            echo "[OK] 本平台产物目录: ${ARTIFACT_DIR}"
             echo "产物清单:"
             find "$ARTIFACT_DIR" -maxdepth 1 -type f | sed 's|^|  |' | head -40
             echo "APK 包数量: $(find "$ARTIFACT_DIR/packages" -name '*.apk' 2>/dev/null | wc -l)"
           else
-            echo "[ERROR] 产物目录不存在，无法上传完整包: ${ARTIFACT_DIR}"
+            echo "[WARN] 本平台产物目录不存在，跳过清单打印: ${ARTIFACT_DIR}"
+          fi
+
+          # 整个 bin 输出目录：供 5.5 整体上传，必须存在
+          if [ -d immortalwrt/bin ]; then
+            echo "[OK] bin 输出目录: immortalwrt/bin"
+            echo "bin 顶层内容:"
+            ls -1 immortalwrt/bin | sed 's|^|  |'
+            echo "bin 文件总数: $(find immortalwrt/bin -type f 2>/dev/null | wc -l)"
+            echo "bin 总体积: $(du -sh immortalwrt/bin 2>/dev/null | cut -f1)"
+          else
+            echo "[ERROR] bin 输出目录不存在，无法上传完整产物: immortalwrt/bin"
             exit 1
           fi
 
@@ -794,6 +699,7 @@ jobs:
           echo "=========================================="
 
           echo "FIRMWARE=$STAGE_DIR" >> $GITHUB_ENV
+          echo "BIN_DIR=immortalwrt/bin" >> $GITHUB_ENV
           echo "ARTIFACT_DIR=$ARTIFACT_DIR" >> $GITHUB_ENV
           echo "device_id=${DEVICE_ID}" >> $GITHUB_OUTPUT
           echo "status=success" >> $GITHUB_OUTPUT
@@ -842,12 +748,11 @@ jobs:
       # ----------------------------------------------------------
       # 5.5 上传完整编译产物
       #
-      # 上传的是编译产物目录（bin/targets/<平台>）内的全部内容，
+      # 上传的是整个 bin 输出目录（immortalwrt/bin/）内的全部内容，
       # 而不是暂存目录里重命名过的那几个文件。包含：
-      #   - 固件镜像（含本设备与同平台其他设备）
-      #   - 内核与设备树
-      #   - profiles.json、sha256sums、*.manifest
-      #   - packages/ 下的全部 .apk 安装包
+      #   bin/targets/<平台>/   固件镜像、内核、设备树、
+      #                         profiles.json、sha256sums、*.manifest
+      #   bin/packages/<架构>/  编译出的全部 .apk 安装包
       # 注意：upload-artifact 默认跳过隐藏文件，这里显式包含。
       #       该参数需要 actions/upload-artifact v4.4.0+，@v4 已满足；
       #       若报 "Unexpected input(s) 'include-hidden-files'"，说明 runner
@@ -858,7 +763,7 @@ jobs:
         if: ${{ !inputs.skip_compile && steps.organize.outputs.status == 'success' && !cancelled() }}
         with:
           name: "ImmortalWrt-${{ steps.organize.outputs.device_id }}-${{ steps.version.outputs.tag }}-full"
-          path: ${{ env.ARTIFACT_DIR }}/
+          path: ${{ env.BIN_DIR }}/
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 90

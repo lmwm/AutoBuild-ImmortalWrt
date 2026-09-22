@@ -111,7 +111,7 @@
   [5.2] 上传 sysupgrade 固件
   [5.3] 上传 recovery/factory 固件
   [5.4] 上传配置文件
-  [5.5] 上传完整编译产物（产物目录内全部文件）
+  [5.5] 上传完整编译产物（整个 bin 目录）
 ```
 
 ## 配置文件说明
@@ -314,12 +314,10 @@ device:
 | `...-config` | `ImmortalWrt-CudyTR3000-v25.12.1-config.zip` | 编译配置，文件名为 `设备型号-ImmortalWrt-V版本-构建号-config-日期.config` |
 | `...-full` | `ImmortalWrt-CudyTR3000-v25.12.1-full.zip` | **完整编译产物**（见下） |
 
-其中 `-full` 上传的是编译产物目录（`bin/targets/<平台>/`）内的**全部文件**，而不是单独的几个固件，包含：
+其中 `-full` 上传的是**整个 `bin` 输出目录**（`bin/`）内的全部内容，而不是单独的几个固件，包含：
 
-- 固件镜像（含本设备与同平台其他设备的镜像）
-- 内核与设备树（`*Image`、`*.dtb`）
-- `profiles.json`、`sha256sums`、`*.manifest`
-- `packages/` 下编译出的全部 `.apk` 安装包
+- `bin/targets/<平台>/`：固件镜像（含本设备与同平台其他设备的镜像）、内核与设备树（`*Image`、`*.dtb`）、`profiles.json`、`sha256sums`、`*.manifest`
+- `bin/packages/<架构>/`：编译出的全部 `.apk` 安装包
 
 该步骤显式启用了 `include-hidden-files`（隐藏文件默认不上传）。此参数需要 `actions/upload-artifact` v4.4.0+，`@v4` 已满足；若日志报 `Unexpected input(s) 'include-hidden-files'`，说明所用 v4 版本过旧。
 
