@@ -41,6 +41,10 @@ on:
         description: "启用编译缓存（ccache + 源码下载 dl，可显著加速重复编译）"
         type: boolean
         default: true
+      debug_oaf_only:
+        description: "快速测试：仅编译 OpenAppFilter 三包（oaf + appfilter + luci-app-oaf），不编译完整固件"
+        type: boolean
+        default: false
       skip_compile:
         description: "跳过编译（调试模式）"
         type: boolean
@@ -538,6 +542,42 @@ jobs:
           echo "=========================================="
           echo "  编译固件"
           echo "=========================================="
+
+          # 快速测试模式：仅编译 OpenAppFilter 三包，不编译完整固件
+          if [ "${{ inputs.debug_oaf_only }}" = "true" ]; then
+            echo "[快速测试] 仅编译 OpenAppFilter 三包"
+            echo ""
+            FAIL=0
+            for pkg in \
+              package/app/OpenAppFilter/oaf \
+              package/app/OpenAppFilter/open-app-filter \
+              package/app/OpenAppFilter/luci-app-oaf; do
+              echo "--- 编译: $pkg ---"
+              if make "$pkg/compile" -j$(nproc) V=s 2>&1 | tail -20; then
+                echo "[OK] $pkg 编译成功"
+              else
+                echo "[FAIL] $pkg 编译失败"
+                FAIL=1
+              fi
+              echo ""
+            done
+
+            if [ "$FAIL" = "1" ]; then
+              echo "::error::OpenAppFilter 有包编译失败，详见上方 V=s 日志"
+              exit 1
+            fi
+
+            echo "[OK] OpenAppFilter 三包全部编译成功"
+            echo ""
+            echo "=== 产物检查 ==="
+            find bin/packages -name "*.apk" -path "*oaf*" -o -name "*.apk" -path "*appfilter*" 2>/dev/null | head -10
+            find bin/targets -name "*.ko" -path "*oaf*" 2>/dev/null | head -5
+
+            echo "status=success" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # 完整编译模式
           echo "多线程编译: -j$(nproc)"
 
           # 优先多线程；失败后降级单线程重试，最后带详细日志重试
