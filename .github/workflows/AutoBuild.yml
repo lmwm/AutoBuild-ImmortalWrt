@@ -544,6 +544,27 @@ jobs:
             echo "[快速测试] 专项验证 OpenAppFilter（重点：kmod-oaf）"
             echo ""
 
+            # ---- 第 0 步：编译 host 工具链（lua/host 依赖 sed 等） ----
+            echo "======================================================"
+            echo "  [0/2] 编译 host 工具链（tools/sed 等）"
+            echo "======================================================"
+            echo "[INFO] 快速测试直接编译单个包，跳过了 tools/toolchain 阶段"
+            echo "       lua 的 host-compile 依赖 staging_dir/host/bin/sed"
+            echo "       需要先编译 tools/sed，否则会报 No such file or directory"
+            echo ""
+            make tools/sed/compile -j$(nproc) V=s 2>&1 | tail -20
+            if [ ! -f staging_dir/host/bin/sed ]; then
+              echo "[WARN] tools/sed 未产出 sed，尝试完整 tools/install"
+              make tools/install -j$(nproc) V=s 2>&1 | tail -30
+            fi
+            if [ -f staging_dir/host/bin/sed ]; then
+              echo "[OK] host sed 已就绪: $(staging_dir/host/bin/sed --version 2>/dev/null | head -1)"
+            else
+              echo "[ERROR] host sed 仍不可用，后续 lua/host 编译必然失败"
+              exit 1
+            fi
+            echo ""
+
             # ---- 第 1 步：专项验证 kmod-oaf（历史问题包） ----
             echo "======================================================"
             echo "  [1/2] 编译 kmod-oaf（内核模块，历史问题包）"
