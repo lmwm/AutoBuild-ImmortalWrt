@@ -37,7 +37,7 @@ on:
 
 env:
   # 下拉列表中保留的历史版本数量
-  KEEP_COUNT: 8
+  KEEP_COUNT: 4
 
 # 推送依赖 SYNC_TOKEN，这里只需读取权限
 permissions:

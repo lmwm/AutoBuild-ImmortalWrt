@@ -23,7 +23,7 @@ on:
         default: "Cudy TR3000"
         required: true
       tag:
-        description: "ImmortalWrt 版本标签（列表由「同步版本标签」工作流定期维护，无需手输）"
+        description: "ImmortalWrt 版本标签"
         type: choice
         options:
           - latest
@@ -31,14 +31,10 @@ on:
           - "v25.12.1"
           - "v25.12.0"
           - "v24.10.6"
-          - "v24.10.5"
-          - "v24.10.4"
-          - "v24.10.3"
-          - "v24.10.2"
         default: latest
         required: true
       cache_enabled:
-        description: "启用编译缓存（ccache + 源码下载 dl，可显著加速重复编译）"
+        description: "启用编译缓存"
         type: boolean
         default: true
       debug_oaf_only:
