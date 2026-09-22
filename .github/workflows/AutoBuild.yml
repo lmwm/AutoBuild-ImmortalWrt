@@ -543,17 +543,65 @@ jobs:
           echo "  编译固件"
           echo "=========================================="
 
-          # 快速测试模式：仅编译 OpenAppFilter 三包，不编译完整固件
+          # 快速测试模式：专项验证 kmod-oaf + OpenAppFilter 三包
           if [ "${{ inputs.debug_oaf_only }}" = "true" ]; then
-            echo "[快速测试] 仅编译 OpenAppFilter 三包"
+            echo "[快速测试] 专项验证 OpenAppFilter（重点：kmod-oaf）"
             echo ""
+
+            # ---- 第 1 步：专项验证 kmod-oaf（历史问题包） ----
+            echo "======================================================"
+            echo "  [1/2] 编译 kmod-oaf（内核模块，历史问题包）"
+            echo "======================================================"
+            OAF_START=$(date +%s)
+            if make package/app/OpenAppFilter/oaf/compile V=s; then
+              OAF_END=$(date +%s)
+              OAF_TIME=$((OAF_END - OAF_START))
+              echo ""
+              echo "[OK] kmod-oaf 编译成功（耗时 ${OAF_TIME}s）"
+
+              # 关键检查：之前的问题是 0.07s 跳过（Nothing to be done）
+              if [ "$OAF_TIME" -lt 5 ]; then
+                echo "[WARN] 编译耗时仅 ${OAF_TIME}s，可能被跳过！"
+                echo "       检查是否有 'Nothing to be done' 提示"
+              fi
+
+              # 产物检查：oaf.ko 必须存在
+              OAF_KO=$(find build_dir -name "oaf.ko" -path "*oaf*" 2>/dev/null | head -1)
+              if [ -n "$OAF_KO" ]; then
+                echo "[OK] oaf.ko 已生成: $OAF_KO"
+                echo "     大小: $(du -h "$OAF_KO" | cut -f1)"
+              else
+                echo "[FAIL] oaf.ko 未找到！kmod-oaf 编译未产出内核模块"
+                find build_dir -path "*oaf*" -name "*.ko" 2>/dev/null | head -5
+                exit 1
+              fi
+
+              # 产物检查：kmod-oaf-*.apk 必须存在
+              OAF_APK=$(find bin -name "kmod-oaf-*.apk" 2>/dev/null | head -1)
+              if [ -n "$OAF_APK" ]; then
+                echo "[OK] kmod-oaf APK 已生成: $OAF_APK"
+              else
+                echo "[WARN] kmod-oaf APK 未找到（可能打包阶段未执行）"
+                find bin -name "*oaf*" -o -name "*appfilter*" 2>/dev/null | head -10
+              fi
+            else
+              OAF_END=$(date +%s)
+              echo ""
+              echo "[FAIL] kmod-oaf 编译失败（耗时 $((OAF_END - OAF_START))s）"
+              echo "::error::kmod-oaf 编译失败，这是历史问题包，请查看上方完整 V=s 日志"
+              exit 1
+            fi
+
+            echo ""
+            echo "======================================================"
+            echo "  [2/2] 编译 open-app-filter + luci-app-oaf"
+            echo "======================================================"
             FAIL=0
             for pkg in \
-              package/app/OpenAppFilter/oaf \
               package/app/OpenAppFilter/open-app-filter \
               package/app/OpenAppFilter/luci-app-oaf; do
               echo "--- 编译: $pkg ---"
-              if make "$pkg/compile" -j$(nproc) V=s 2>&1 | tail -20; then
+              if make "$pkg/compile" -j$(nproc) V=s 2>&1 | tail -30; then
                 echo "[OK] $pkg 编译成功"
               else
                 echo "[FAIL] $pkg 编译失败"
@@ -562,17 +610,21 @@ jobs:
               echo ""
             done
 
+            echo "=== 最终产物清单 ==="
+            echo "内核模块 (.ko):"
+            find build_dir -path "*oaf*" -name "*.ko" 2>/dev/null | head -5
+            echo ""
+            echo "APK 包:"
+            find bin -name "*oaf*" -o -name "*appfilter*" 2>/dev/null | grep -E '\.apk$' | head -10
+
             if [ "$FAIL" = "1" ]; then
-              echo "::error::OpenAppFilter 有包编译失败，详见上方 V=s 日志"
+              echo ""
+              echo "::error::open-app-filter 或 luci-app-oaf 编译失败"
               exit 1
             fi
 
-            echo "[OK] OpenAppFilter 三包全部编译成功"
             echo ""
-            echo "=== 产物检查 ==="
-            find bin/packages -name "*.apk" -path "*oaf*" -o -name "*.apk" -path "*appfilter*" 2>/dev/null | head -10
-            find bin/targets -name "*.ko" -path "*oaf*" 2>/dev/null | head -5
-
+            echo "[OK] OpenAppFilter 全部编译成功，kmod-oaf 产物已确认"
             echo "status=success" >> $GITHUB_OUTPUT
             exit 0
           fi
