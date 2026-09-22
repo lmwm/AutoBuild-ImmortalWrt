@@ -48,11 +48,23 @@ echo "[OK] 已添加: OpenClash (luci-app-openclash)"
 #   kmod-oaf      -> oaf 内核模块（Netfilter 扩展，依赖 kmod-ipt-conntrack）
 # 三者都启用才能工作，Packages.yaml 中只写 luci-app-oaf 即可，
 # make defconfig 会通过依赖关系自动选中 appfilter 与 kmod-oaf。
+#
+# 注意：ImmortalWrt 默认集成了 OpenAppFilter，必须全部删除后再克隆，
+#       否则两份 KernelPackage/oaf 定义冲突，导致 kmod-oaf 编译被跳过
+#       （编译耗时仅 0.07s，无产出 .ko），最终 package/install 报
+#       "kmod-oaf (no such package)"。
+#
+#   feeds 中的默认包（需全部删除）：
+#     feeds/packages/net/open-app-filter        -> appfilter + oaf 内核模块
+#     feeds/luci/applications/luci-app-appfilter -> LuCI 界面（旧版命名）
+#     feeds/luci/applications/luci-app-oaf       -> LuCI 界面（新版命名）
 # -----------------------------------------------------------
+find "$OPENWRT_DIR/package/feeds/" -name "open-app-filter" -exec rm -rf {} + 2>/dev/null
+find "$OPENWRT_DIR/package/feeds/" -name "luci-app-appfilter" -exec rm -rf {} + 2>/dev/null
 find "$OPENWRT_DIR/package/feeds/" -name "luci-app-oaf" -exec rm -rf {} + 2>/dev/null
 git clone --depth 1 https://github.com/destan19/OpenAppFilter.git \
     "$OPENWRT_DIR/package/app/OpenAppFilter"
-echo "[OK] 已添加: OpenAppFilter (luci-app-oaf)"
+echo "[OK] 已添加: OpenAppFilter (luci-app-oaf + appfilter + kmod-oaf)"
 
 # -----------------------------------------------------------
 # OpenAppFilter 内核模块补丁
