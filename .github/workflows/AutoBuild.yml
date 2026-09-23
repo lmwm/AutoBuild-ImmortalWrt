@@ -486,6 +486,42 @@ jobs:
           key: dl-${{ runner.os }}-${{ steps.device.outputs.platform }}-${{ steps.version.outputs.tag }}
 
       # ----------------------------------------------------------
+      # 3.5.1 ccache 校验方式与调优
+      #
+      # 背景：ccache 默认以「编译器二进制的 mtime + size」作为缓存校验依据
+      #       （ccache 手册 compiler_check，默认值 mtime）。CI 每次运行都会
+      #       重新编译交叉工具链，mtime 必然变化，于是恢复回来的缓存对
+      #       ccache 而言「不是同一个编译器」，target 侧全部 miss ——
+      #       表现为缓存显示已命中、编译时间却几乎没变。
+      #
+      # 上游记录：openwrt/openwrt 提交 39562875（build: do not set
+      #       CCACHE_COMPILERCHECK）的说明指出，CI 必须额外写一份
+      #       compiler_check，因为 "compiler mtimes would not match after
+      #       restoring a cache archive"；官方 CI 用
+      #       string:<工具链提交 SHA>，此处用 content（哈希编译器内容），
+      #       效果等价且无需维护工具链 SHA。
+      #
+      # 位置要求：必须在 [3.4] 恢复 ccache 缓存之后执行，否则写好的配置
+      #       会被恢复出来的旧缓存覆盖。
+      # ----------------------------------------------------------
+      - name: "[3.5.1] 配置 ccache 校验方式"
+        if: ${{ inputs.cache_enabled }}
+        run: |
+          mkdir -p immortalwrt/.ccache
+          cat > immortalwrt/.ccache/ccache.conf <<'EOF'
+          # 本文件由 AutoBuild.yml 的 [3.5.1] 每次运行重写，确保设置生效
+          # 以编译器内容而非 mtime 校验：CI 每次重建工具链，mtime 必然变化
+          compiler_check = content
+          # 依赖模式：从依赖文件推导实际用到的头文件，提速并提高命中率
+          depend_mode = true
+          # 放宽无法稳定复现的哈希项（时间宏、源文件时间戳等）
+          sloppiness = file_macro,locale,time_macros,include_file_ctime,include_file_mtime
+          max_size = 5G
+          EOF
+          echo "[缓存] ccache 配置:"
+          cat immortalwrt/.ccache/ccache.conf
+
+      # ----------------------------------------------------------
       # 3.6 同步配置
       # ----------------------------------------------------------
       - name: "[3.6] 同步配置 (defconfig)"
@@ -555,10 +591,18 @@ jobs:
           fi
 
           # ccache 命中统计与缓存体积（仅在启用缓存时）
-          if [ "${{ inputs.cache_enabled }}" = "true" ] && command -v ccache >/dev/null 2>&1; then
+          #
+          # 注意：这里必须用 OpenWrt 自己编译的 ccache
+          #       （staging_dir/host/bin/ccache，版本与写入缓存的一致），
+          #       并显式指定 CCACHE_DIR。rules.mk 中的 CCACHE_DIR 只在 make
+          #       子进程内生效，直接执行 `ccache -s` 会去读默认的 ~/.ccache
+          #       （空目录），从而永远显示 0.00%，掩盖真实命中率。
+          #       统计值是累计值（含被恢复的历史数据），对比多次运行的
+          #       hits/misses 变化即可算出差值。
+          if [ "${{ inputs.cache_enabled }}" = "true" ] && [ -x staging_dir/host/bin/ccache ]; then
             echo ""
-            echo "[缓存] ccache 统计:"
-            ccache -s || true
+            echo "[缓存] ccache 统计（累计）:"
+            CCACHE_DIR="$PWD/.ccache" staging_dir/host/bin/ccache -s || true
             if [ -d .ccache ]; then
               echo "[缓存] .ccache 体积: $(du -sh .ccache 2>/dev/null | cut -f1)"
             else

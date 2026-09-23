@@ -73,7 +73,18 @@
 - 两个缓存都带平台维度，将来新增不同平台的设备时不会互相污染
 - GitHub 单个缓存上限 10GB，dl 目录通常在数 GB 级；若提示超限，编译不受影响，仅本次不保存 dl 缓存
 - 启用缓存时会在 `.config` 写入 `CONFIG_DEVEL=y` + `CONFIG_CCACHE=y`（`CONFIG_CCACHE` 的可见性依赖 `CONFIG_DEVEL`），缓存目录沿用 OpenWrt 默认的 `$(TOPDIR)/.ccache`
-- 编译结束后 `[4.2]` 会打印 ccache 命中统计与缓存体积，据此判断缓存是否真的生效
+- **ccache 的编译器校验方式必须显式指定**：ccache 默认以「编译器二进制的 mtime + size」校验，而本工作流每次运行都会重新编译交叉工具链，mtime 必然变化，恢复回来的缓存对 target 侧会全部失效——表现为缓存显示已命中、编译时间却几乎不变。因此 `[3.5.1]` 会在缓存恢复之后写入 `immortalwrt/.ccache/ccache.conf`：
+
+  ```ini
+  compiler_check = content
+  depend_mode = true
+  sloppiness = file_macro,locale,time_macros,include_file_ctime,include_file_mtime
+  max_size = 5G
+  ```
+
+  上游依据：openwrt/openwrt 提交 `39562875`（`build: do not set CCACHE_COMPILERCHECK`）指出 CI 必须额外写 `compiler_check`，因为 "compiler mtimes would not match after restoring a cache archive"；官方 CI 用 `string:<工具链提交 SHA>`，此处用 `content`（哈希编译器内容），效果等价且无需维护 SHA
+- `[3.5.1]` 必须排在 `[3.4]` 之后，否则写好的配置会被恢复出来的缓存覆盖；该改动生效后的**第一次**编译仍是全量（旧缓存条目因校验方式变化而失效），从第二次同版本编译开始才体现加速
+- 编译结束后 `[4.2]` 打印 ccache 统计，用的是 OpenWrt 自编译的 `staging_dir/host/bin/ccache`（版本与写入缓存者一致，v25.12.2 为 4.12.1）并显式指定 `CCACHE_DIR`。系统自带的 `ccache -s` 会去读空的 `~/.ccache`，永远显示 `0.00%`，不能用来判断命中率
 - 关闭该开关则每次都从零编译，用于排查缓存引入的疑难问题
 
 ## 编译流程
@@ -98,6 +109,7 @@
   [3.3] 生成编译配置（Packages.yaml）
   [3.4] 恢复 ccache 缓存（可选）
   [3.5] 恢复源码下载缓存（可选）
+  [3.5.1] 配置 ccache 校验方式（可选）
   [3.6] 同步配置（make defconfig）
   [3.7] 修复 Rust LLVM
 
