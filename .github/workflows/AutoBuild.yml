@@ -466,6 +466,10 @@ jobs:
       #     进而报 hash 校验失败。宁可为每个版本各存一份，也不冒串味的风险。
       #   - ccache 保留跨版本 restore-keys。ccache 以预处理后的源码与编译命令行
       #     做哈希，版本变了自然全部失效（安全），命中不了只是没加速，不会出错。
+      #   - ccache 主键末尾带 compiler_check 版本标记（当前 -cc2）。actions/cache
+      #     在主键完全命中时不会再保存缓存：一旦改动 [3.5.1] 的校验方式，旧键
+      #     恢复出来的条目会全部失效、新条目又存不下去，缓存会永远停在旧格式。
+      #     因此每次改动校验方式都必须同步递增该后缀（cc3、cc4…）。
       #   - 注意：GitHub 单个缓存上限 10GB。dl 目录通常在数 GB 级，若日志提示
       #     缓存超限，编译不受影响，只是本次不保存 dl 缓存。
       # ----------------------------------------------------------
@@ -474,7 +478,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: immortalwrt/.ccache
-          key: ccache-${{ runner.os }}-${{ steps.device.outputs.platform }}-${{ steps.version.outputs.tag }}
+          key: ccache-${{ runner.os }}-${{ steps.device.outputs.platform }}-${{ steps.version.outputs.tag }}-cc2
           restore-keys: |
             ccache-${{ runner.os }}-${{ steps.device.outputs.platform }}-
 
