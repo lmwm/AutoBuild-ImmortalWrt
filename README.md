@@ -83,7 +83,7 @@
   max_size = 5G
   ```
 
-  上游依据：openwrt/openwrt 提交 `39562875`（`build: do not set CCACHE_COMPILERCHECK`）指出 CI 必须额外写 `compiler_check`，因为 "compiler mtimes would not match after restoring a cache archive"；官方 CI 用 `string:<工具链提交 SHA>`，此处用 `content`（哈希编译器内容），效果等价且无需维护 SHA
+  上游依据：openwrt/openwrt 提交 `39562875`（`build: do not set CCACHE_COMPILERCHECK`）指出 CI 必须额外写 `compiler_check`，因为 "compiler mtimes would not match after restoring a cache archive"。以上判断已按 **ImmortalWrt v25.12.2** 源码核实：其 `rules.mk` 同样不设置 `CCACHE_COMPILERCHECK`、`CCACHE_DIR` 同样默认回落到 `$(TOPDIR)/.ccache`，打包的 ccache 为 4.12.1。另注意官方 CI 的 `compiler_type=gcc` **不可照搬**——ImmortalWrt 25.12 起内核使用 clang 编译，本工作流交给 ccache 自动识别编译器类型
 - `[3.5.1]` 必须排在 `[3.4]` 之后，否则写好的配置会被恢复出来的缓存覆盖；该改动生效后的**第一次**编译仍是全量（旧缓存条目因校验方式变化而失效），从第二次同版本编译开始才体现加速
 - 编译结束后 `[4.2]` 打印 ccache 统计，用的是 OpenWrt 自编译的 `staging_dir/host/bin/ccache`（版本与写入缓存者一致，v25.12.2 为 4.12.1）并显式指定 `CCACHE_DIR`。系统自带的 `ccache -s` 会去读空的 `~/.ccache`，永远显示 `0.00%`，不能用来判断命中率
 - 关闭该开关则每次都从零编译，用于排查缓存引入的疑难问题

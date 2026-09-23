@@ -505,6 +505,12 @@ jobs:
       #       string:<工具链提交 SHA>，此处用 content（哈希编译器内容），
       #       效果等价且无需维护工具链 SHA。
       #
+      # ImmortalWrt 核实（v25.12.2）：其 rules.mk 同样不设置
+      #       CCACHE_COMPILERCHECK，全仓库无 CCACHE_CONFIGPATH 引用（因此
+      #       $CCACHE_DIR/ccache.conf 会生效），打包的 ccache 为 4.12.1，
+      #       下列配置项均受支持。另注意：ImmortalWrt 25.12 起内核走 clang，
+      #       不要照搬官方 CI 的 compiler_type=gcc，交给 ccache 自动识别。
+      #
       # 位置要求：必须在 [3.4] 恢复 ccache 缓存之后执行，否则写好的配置
       #       会被恢复出来的旧缓存覆盖。
       # ----------------------------------------------------------
