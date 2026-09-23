@@ -657,7 +657,9 @@ jobs:
           # 固件文件名保留型号原有空格（Cudy TR3000-...）
           DEVICE_ID=$(echo "$MODEL" | tr -d ' ' | tr -cd 'A-Za-z0-9._-')
           BUILD_ID=$(head -1 immortalwrt/version 2>/dev/null || echo "unknown")
-          DATE_STR=$(date +%Y%m%d)
+          # 编译时刻（YYYYMMDD-HHMM），时区由 job 的 env.TZ 决定（当前 Asia/Shanghai）
+          # 该前缀放在文件名最前，便于按编译先后排序
+          DATE_STR=$(date +%Y%m%d-%H%M)
           STAGE_DIR="$GITHUB_WORKSPACE/firmware"
           mkdir -p "$STAGE_DIR"
 
@@ -715,16 +717,18 @@ jobs:
               *factory*)             suffix="factory" ;;
               *) suffix="${base%.*}" ;;
             esac
-            # 命名规则：设备型号在前（保留原有空格），日期放在末尾
-            new_name="${MODEL}-ImmortalWrt-V${VERSION_RAW}-${BUILD_ID}-${suffix}-${DATE_STR}.${ext}"
+            # 命名规则：编译时间在最前（YYYYMMDD-HHMM，便于排序），
+            #           设备型号保留原有空格
+            new_name="${DATE_STR}-${MODEL}-ImmortalWrt-V${VERSION_RAW}-${BUILD_ID}-${suffix}.${ext}"
             cp "$file" "$STAGE_DIR/$new_name"
             echo "[FILE] $base -> $new_name"
           done
           echo "[OK] 共处理 $(printf '%s\n' "$FW_FILES" | grep -c . || true) 个固件"
 
-          # 复制配置文件（设备型号在前，日期在末尾，带 .config 后缀）
-          cp immortalwrt/.config "$STAGE_DIR/${MODEL}-ImmortalWrt-V${VERSION_RAW}-${BUILD_ID}-config-${DATE_STR}.config"
-          echo "[FILE] .config -> ${MODEL}-ImmortalWrt-V${VERSION_RAW}-${BUILD_ID}-config-${DATE_STR}.config"
+          # 复制配置文件（编译时间在最前，与固件命名规则保持一致）
+          CP_NAME="${DATE_STR}-${MODEL}-ImmortalWrt-V${VERSION_RAW}-${BUILD_ID}-config.config"
+          cp immortalwrt/.config "$STAGE_DIR/$CP_NAME"
+          echo "[FILE] .config -> $CP_NAME"
 
           # 本平台产物目录：仅用于打印清单与健全性校验
           if [ -n "$ARTIFACT_DIR" ] && [ -d "$ARTIFACT_DIR" ]; then
@@ -756,6 +760,8 @@ jobs:
           echo "BIN_DIR=immortalwrt/bin" >> $GITHUB_ENV
           echo "ARTIFACT_DIR=$ARTIFACT_DIR" >> $GITHUB_ENV
           echo "device_id=${DEVICE_ID}" >> $GITHUB_OUTPUT
+          # 供 5.2-5.5 的 Artifact 名称使用，与固件文件名前缀保持一致
+          echo "date_str=${DATE_STR}" >> $GITHUB_OUTPUT
           echo "status=success" >> $GITHUB_OUTPUT
 
       # ----------------------------------------------------------
@@ -765,7 +771,7 @@ jobs:
         uses: actions/upload-artifact@v4
         if: ${{ !inputs.skip_compile && steps.organize.outputs.status == 'success' && !cancelled() }}
         with:
-          name: "ImmortalWrt-${{ steps.organize.outputs.device_id }}-${{ steps.version.outputs.tag }}-sysupgrade"
+          name: "${{ steps.organize.outputs.date_str }}-ImmortalWrt-${{ steps.organize.outputs.device_id }}-${{ steps.version.outputs.tag }}-sysupgrade"
           path: ${{ env.FIRMWARE }}/*sysupgrade*
           if-no-files-found: error
           retention-days: 90
@@ -780,7 +786,7 @@ jobs:
         uses: actions/upload-artifact@v4
         if: ${{ !inputs.skip_compile && steps.organize.outputs.status == 'success' && !cancelled() }}
         with:
-          name: "ImmortalWrt-${{ steps.organize.outputs.device_id }}-${{ steps.version.outputs.tag }}-recovery"
+          name: "${{ steps.organize.outputs.date_str }}-ImmortalWrt-${{ steps.organize.outputs.device_id }}-${{ steps.version.outputs.tag }}-recovery"
           path: |
             ${{ env.FIRMWARE }}/*recovery*
             ${{ env.FIRMWARE }}/*factory*
@@ -794,7 +800,7 @@ jobs:
         uses: actions/upload-artifact@v4
         if: ${{ !inputs.skip_compile && steps.organize.outputs.status == 'success' && !cancelled() }}
         with:
-          name: "ImmortalWrt-${{ steps.organize.outputs.device_id }}-${{ steps.version.outputs.tag }}-config"
+          name: "${{ steps.organize.outputs.date_str }}-ImmortalWrt-${{ steps.organize.outputs.device_id }}-${{ steps.version.outputs.tag }}-config"
           path: ${{ env.FIRMWARE }}/*.config
           if-no-files-found: error
           retention-days: 90
@@ -816,7 +822,7 @@ jobs:
         uses: actions/upload-artifact@v4
         if: ${{ !inputs.skip_compile && steps.organize.outputs.status == 'success' && !cancelled() }}
         with:
-          name: "ImmortalWrt-${{ steps.organize.outputs.device_id }}-${{ steps.version.outputs.tag }}-full"
+          name: "${{ steps.organize.outputs.date_str }}-ImmortalWrt-${{ steps.organize.outputs.device_id }}-${{ steps.version.outputs.tag }}-full"
           path: ${{ env.BIN_DIR }}/
           include-hidden-files: true
           if-no-files-found: error

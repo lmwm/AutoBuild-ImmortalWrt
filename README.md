@@ -318,14 +318,14 @@ device:
 
 ## 输出文件
 
-编译完成后会上传 4 个 Artifact。Artifact 名称把设备型号中的**空格去掉**（如 `CudyTR3000`），避免下载的 zip 文件名带空格；下载后的压缩包名即 `<Artifact 名称>.zip`。
+编译完成后会上传 4 个 Artifact。Artifact 名称以**编译时间** `YYYYMMDD-HHMM` 开头（时区取 job 的 `TZ`，当前 `Asia/Shanghai`），便于在 Actions 页面按编译先后排序；设备型号中的**空格去掉**（如 `CudyTR3000`），避免下载的 zip 文件名带空格。下载后的压缩包名即 `<Artifact 名称>.zip`。
 
 | Artifact | 下载后文件名 | 内容 |
 |----------|--------------|------|
-| `...-sysupgrade` | `ImmortalWrt-CudyTR3000-v25.12.1-sysupgrade.zip` | 系统升级固件（匹配 `*sysupgrade*`） |
-| `...-recovery` | `ImmortalWrt-CudyTR3000-v25.12.1-recovery.zip` | 恢复/工厂固件（匹配 `*recovery*`、`*factory*`），无此产物时跳过 |
-| `...-config` | `ImmortalWrt-CudyTR3000-v25.12.1-config.zip` | 编译配置，文件名为 `设备型号-ImmortalWrt-V版本-构建号-config-日期.config` |
-| `...-full` | `ImmortalWrt-CudyTR3000-v25.12.1-full.zip` | **完整编译产物**（见下） |
+| `...-sysupgrade` | `20260922-1930-ImmortalWrt-CudyTR3000-v25.12.2-sysupgrade.zip` | 系统升级固件（匹配 `*sysupgrade*`） |
+| `...-recovery` | `20260922-1930-ImmortalWrt-CudyTR3000-v25.12.2-recovery.zip` | 恢复/工厂固件（匹配 `*recovery*`、`*factory*`），无此产物时跳过 |
+| `...-config` | `20260922-1930-ImmortalWrt-CudyTR3000-v25.12.2-config.zip` | 编译配置，文件名为 `编译时间-设备型号-ImmortalWrt-V版本-构建号-config.config` |
+| `...-full` | `20260922-1930-ImmortalWrt-CudyTR3000-v25.12.2-full.zip` | **完整编译产物**（见下） |
 
 其中 `-full` 上传的是**整个 `bin` 输出目录**（`bin/`）内的全部内容，而不是单独的几个固件，包含：
 
@@ -334,8 +334,10 @@ device:
 
 该步骤显式启用了 `include-hidden-files`（隐藏文件默认不上传）。此参数需要 `actions/upload-artifact` v4.4.0+，`@v4` 已满足；若日志报 `Unexpected input(s) 'include-hidden-files'`，说明所用 v4 版本过旧。
 
-已重命名的固件统一格式为 `设备型号-ImmortalWrt-V版本-构建号-类型-日期.扩展名`，例如
-`Cudy TR3000-ImmortalWrt-V25.12.1-r1234-abcd123-squashfs-sysupgrade-20260101.itb`。
+已重命名的固件统一格式为 `编译时间-设备型号-ImmortalWrt-V版本-构建号-类型.扩展名`，例如
+`20260922-1930-Cudy TR3000-ImmortalWrt-V25.12.2-r1234-abcd123-squashfs-sysupgrade.itb`。
+
+编译时间前缀为 `YYYYMMDD-HHMM`（取 `[5.1]` 的执行时刻，时区为 job 的 `TZ`），放在文件名最前面便于按编译先后排序；配置文件与 4 个 Artifact 名称使用同一前缀。
 
 设备型号保留原有空格（如 `Cudy TR3000`）；仅在 Artifact 名称中去掉空格（`CudyTR3000`），避免下载的 zip 文件名带空格。
 
