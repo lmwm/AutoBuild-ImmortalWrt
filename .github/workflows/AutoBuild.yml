@@ -473,6 +473,28 @@ jobs:
       #   - 注意：GitHub 单个缓存上限 10GB。dl 目录通常在数 GB 级，若日志提示
       #     缓存超限，编译不受影响，只是本次不保存 dl 缓存。
       # ----------------------------------------------------------
+
+      # ----------------------------------------------------------
+      # 3.3.1 恢复工具链缓存（staging_dir）
+      #
+      # staging_dir 包含 host 工具（tools/ 的产物）与交叉工具链
+      # （toolchain/ 的产物：binutils、gcc、musl）。这两部分与 tag 强绑定，
+      # 同一 tag 下内容稳定，因此按 tag 分键、不设 restore-keys。
+      #
+      # 收益：跳过 tools + toolchain 两个阶段的编译（实测约 36 分钟）。
+      # 风险：该目录体积较大（数 GB 级）。若超过 GitHub 缓存上限则本次不保存，
+      #       编译不受影响；[4.3] 打印的精确体积用于评估下一轮增量缓存策略。
+      # ----------------------------------------------------------
+      - name: "[3.3.1] 恢复工具链缓存 (staging_dir)"
+        if: ${{ inputs.cache_enabled }}
+        uses: actions/cache@v4
+        with:
+          path: immortalwrt/staging_dir
+          key: staging-${{ runner.os }}-${{ steps.device.outputs.platform }}-${{ steps.version.outputs.tag }}
+
+      # ----------------------------------------------------------
+      # 3.4 恢复 ccache 缓存
+      # ----------------------------------------------------------
       - name: "[3.4] 恢复 ccache 缓存"
         if: ${{ inputs.cache_enabled }}
         uses: actions/cache@v4
@@ -632,6 +654,18 @@ jobs:
           echo "  编译后磁盘使用"
           echo "=========================================="
           df -hT "$GITHUB_WORKSPACE" | awk 'NR==2 {printf "  可用: %s / %s (%s 已用)\n", $4, $2, $5}'
+          echo "=========================================="
+          echo ""
+          echo "=========================================="
+          echo "  构建目录体积（评估缓存策略用）"
+          echo "=========================================="
+          for d in immortalwrt/staging_dir immortalwrt/build_dir immortalwrt/dl immortalwrt/.ccache; do
+            if [ -d "$d" ]; then
+              printf "  %-24s %-8s (%s 个文件)\n" "$d" "$(du -sh "$d" 2>/dev/null | cut -f1)" "$(find "$d" -type f 2>/dev/null | wc -l)"
+            else
+              printf "  %-24s %s\n" "$d" "(不存在)"
+            fi
+          done
           echo "=========================================="
 
       # ===========================================================
