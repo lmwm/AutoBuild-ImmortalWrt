@@ -160,6 +160,8 @@
 2. **[IB.2]** 用 SDK 编译 `Packages.sh` 实际克隆的第三方包（多为 `PKGARCH:=all` 的脚本/主题包，不涉及内核 ABI），产出 `.apk` 放入 ImageBuilder 的 `packages/`
 3. **[IB.3]** `make image PROFILE=... PACKAGES="..." FILES="..."` 组装固件，`PACKAGES` 列表由 `[3.3]` 从 `Packages.yaml` 生成
 
+> **FILES 路径不能含空格。** 设备目录名（如 `Cudy TR3000`）含空格，而上游 `include/rules.mk` 的 `file_copy` 里是未加引号的 `$(CP) $(1) $(2)`（`CP:=cp -fpR`），路径会被 shell 拆成两个参数，报两条 `cp: cannot stat` 并让 `prepare_rootfs` 失败（2026-09-25 实测）。因此 `[IB.3]` 先把 `Devices/<设备>/files` 复制到不含空格的中转目录 `$RUNNER_TEMP/ib-files`，再把该路径传给 `FILES=`。`make image` 完成后还会回到 rootfs 逐个核对文件是否落地——上游 `if [ -d '$(2)' ]` 在目录缺失时静默跳过，这一步把「型号改名悄悄失效」变成显式失败。
+
 > **[IB.2] 的编译范围由 `Packages.sh` 决定，不在工作流里硬编码包名。** 它比对 `Packages.sh` 执行前后 `package/` 下 Makefile 的差集来识别新增的包（只认含 `BuildPackage` 或 `include package.mk`/`luci.mk` 的 Makefile，因此不会误抓仓库附带的纯工具 Makefile），包名优先取 `PKG_NAME:=`、缺失时回退为目录名。
 >
 > 若 `Packages.sh` 未克隆任何包（例如克隆语句被注释），该步骤直接跳过，对应软件包由 `[IB.3]` 从官方源安装——**此时需保证 `Packages.yaml` 里启用的包在官方源中存在**，否则 `make image` 会因找不到包而失败。增删第三方包只需改 `Devices/<设备>/` 下的配置，不必再动工作流。
@@ -174,6 +176,8 @@ Devices/<设备名>/files/
 ```
 
 该脚本修正 `/etc/board.json`、`/etc/openwrt_release`、`/etc/banner` 里的型号名；`/proc/device-tree/model`（dtb 层）保持原样，那是硬件描述，与运行时显示无关。
+
+工作流在 `make image` 前会把该目录复制到不含空格的中转路径（原因见上文 `[IB.3]` 的说明），因此设备目录名保留空格不影响构建。
 
 ### 注意事项
 
