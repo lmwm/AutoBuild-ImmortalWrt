@@ -289,6 +289,38 @@ jobs:
         working-directory: immortalwrt
         run: ./scripts/feeds install -a
 
+      # ----------------------------------------------------------
+      # 2.7 重置源码时间戳（增量构建的前提）
+      #
+      # 背景：OpenWrt 的 make 依据「构建状态戳（stamp）与依赖文件的相对时间」
+      #       决定是否跳过编译。每次 git clone 出来的源码时间戳都是"现在"，
+      #       而缓存恢复出来的 stamp 时间戳必然比它旧，于是 make 认为全部
+      #       需要重编——这正是只缓存 staging_dir 时 tools/toolchain 仍要
+      #       重编 25 分钟、总耗时几乎不变的原因。
+      #
+      # 做法：在 clone/feeds 之后、Packages.sh/Customize.sh 之前，把源码树的
+      #       时间戳统一改到过去（2020-01-01）。此后：
+      #       - 已缓存的包：stamp 比源码新 -> make 跳过（增量）
+      #       - Packages.sh / Customize.sh 改过的文件：时间戳是"现在" ->
+      #         精准触发对应包（如 oaf、内核/DTS）重建
+      #       - Packages.sh 中 git clone 的外部包：时间戳是"现在" -> 正常重建
+      #         （数量少、体积小，代价可忽略）
+      #
+      # 注意：只碰源码树本身，排除 build_dir / staging_dir / dl / .ccache——
+      #       它们的时间戳必须保持原样（缓存恢复出的新时间戳正是所需）。
+      # ----------------------------------------------------------
+      - name: "[2.7] 重置源码时间戳（增量构建）"
+        if: ${{ inputs.cache_enabled }}
+        run: |
+          cd immortalwrt
+          find . \
+            -path ./build_dir -prune -o \
+            -path ./staging_dir -prune -o \
+            -path ./dl -prune -o \
+            -path ./.ccache -prune -o \
+            -type f -print0 | xargs -0 -r touch -d '2020-01-01 00:00:00'
+          echo "[OK] 源码树时间戳已重置为 2020-01-01（已排除 build_dir/staging_dir/dl/.ccache）"
+
       # ===========================================================
       # 阶段 3: 自定义固件
       # ===========================================================
@@ -475,22 +507,33 @@ jobs:
       # ----------------------------------------------------------
 
       # ----------------------------------------------------------
-      # 3.3.1 恢复工具链缓存（staging_dir）
+      # 3.3.1 恢复构建树缓存（build_dir + staging_dir）
       #
-      # staging_dir 包含 host 工具（tools/ 的产物）与交叉工具链
-      # （toolchain/ 的产物：binutils、gcc、musl）。这两部分与 tag 强绑定，
-      # 同一 tag 下内容稳定，因此按 tag 分键、不设 restore-keys。
+      # 两者必须一起缓存：
+      #   staging_dir —— host 工具与交叉工具链的安装产物（tools/toolchain 的输出）
+      #   build_dir   —— 各包的构建产物与「构建状态戳（stamp）」
+      # 只缓存 staging_dir 是无效的：stamp 在 build_dir 里，make 看不到 stamp
+      # 就会把 tools/toolchain 重新编译一遍（实测 25 分钟白费）。
       #
-      # 收益：跳过 tools + toolchain 两个阶段的编译（实测约 36 分钟）。
-      # 风险：该目录体积较大（数 GB 级）。若超过 GitHub 缓存上限则本次不保存，
-      #       编译不受影响；[4.3] 打印的精确体积用于评估下一轮增量缓存策略。
+      # 增量构建的完整链路：[2.7] 把源码时间戳改旧 -> stamp 显得比源码新 ->
+      # make 跳过已编译的包 -> 只重建 Packages.sh/Customize.sh 改动的包。
+      #
+      # 主键带 github.run_id：actions/cache 在主键完全命中时不会再保存，
+      # 若沿用固定主键，新增的构建结果永远存不进去。带 run_id 后每次都以
+      # 新主键保存，restore-keys 前缀匹配保证仍能复用上一次的缓存，
+      # 旧条目由 GitHub 的 10GB 配额 LRU 自动淘汰。
       # ----------------------------------------------------------
-      - name: "[3.3.1] 恢复工具链缓存 (staging_dir)"
+      - name: "[3.3.1] 恢复构建树缓存 (build_dir + staging_dir)"
+        id: cache-restore
         if: ${{ inputs.cache_enabled }}
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
-          path: immortalwrt/staging_dir
-          key: staging-${{ runner.os }}-${{ steps.device.outputs.platform }}-${{ steps.version.outputs.tag }}
+          path: |
+            immortalwrt/build_dir
+            immortalwrt/staging_dir
+          key: tree-${{ runner.os }}-${{ steps.device.outputs.platform }}-${{ steps.version.outputs.tag }}-v1-${{ github.run_id }}
+          restore-keys: |
+            tree-${{ runner.os }}-${{ steps.device.outputs.platform }}-${{ steps.version.outputs.tag }}-v1-
 
       # ----------------------------------------------------------
       # 3.4 恢复 ccache 缓存
@@ -861,3 +904,38 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 90
+
+      # ----------------------------------------------------------
+      # 5.6 裁剪构建树（缓存体积控制）
+      #
+      # build_dir 编译完成后约 43GB / 128 万文件，远超 GitHub 每仓库 10GB 的
+      # 缓存配额，必须裁剪后再保存。裁剪是安全的：
+      #   - 删除 *.o 等中间目标文件后，make 仍会因 stamp 存在而跳过编译
+      #   - 万一某包需要重编，ccache 命中率 99.99%，可秒回这些 .o
+      #   - 打包所需的 ipkg-* 产物目录与 stamp 一律保留
+      # ----------------------------------------------------------
+      - name: "[5.6] 裁剪构建树（缓存体积控制）"
+        if: ${{ inputs.cache_enabled && !cancelled() }}
+        run: |
+          echo "[裁剪] 之前: build_dir $(du -sh immortalwrt/build_dir 2>/dev/null | cut -f1)"
+          # 中间目标文件与依赖缓存（stamp 保证不会重编；需要时 ccache 秒回）
+          find immortalwrt/build_dir -type f \( -name '*.o' -o -name '*.lo' -o -name '*.obj' -o -name '*.tmp' -o -name 'core.*' \) -delete 2>/dev/null || true
+          find immortalwrt/build_dir -type d \( -name '.deps' -o -name '.tmp' \) -exec rm -rf {} + 2>/dev/null || true
+          echo "[裁剪] 之后: build_dir $(du -sh immortalwrt/build_dir 2>/dev/null | cut -f1)"
+          echo "[裁剪] 之后: staging_dir $(du -sh immortalwrt/staging_dir 2>/dev/null | cut -f1)"
+
+      # ----------------------------------------------------------
+      # 5.7 保存构建树缓存
+      #
+      # key 与 [3.3.1] 保持一致（含 github.run_id），因此每次运行都会以
+      # 新主键保存；restore-keys 前缀匹配保证下次仍能复用本次结果。
+      # 若体积超过 GitHub 缓存上限，此处会提示超限但不影响编译产物。
+      # ----------------------------------------------------------
+      - name: "[5.7] 保存构建树缓存"
+        if: ${{ inputs.cache_enabled && !cancelled() }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            immortalwrt/build_dir
+            immortalwrt/staging_dir
+          key: tree-${{ runner.os }}-${{ steps.device.outputs.platform }}-${{ steps.version.outputs.tag }}-v1-${{ github.run_id }}
