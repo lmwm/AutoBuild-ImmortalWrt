@@ -53,6 +53,6 @@ OPENWRT_DIR="$(pwd)"
 # luci-app-harbor-file
 # 克隆到 package/app/
 # -----------------------------------------------------------
-git clone --depth 1 https://github.com/destan19/luci-app-harbor-file.git \
-    "$OPENWRT_DIR/package/app/luci-app-harbor-file"
-echo "[OK] 已添加: luci-app-harbor-file"
+#git clone --depth 1 #https://github.com/destan19/luci-app-harbor-file.git \
+#    "$OPENWRT_DIR/package/app/luci-app-harbor-file"
+#echo "[OK] 已添加: luci-app-harbor-file"
