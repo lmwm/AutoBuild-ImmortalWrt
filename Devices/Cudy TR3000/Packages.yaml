@@ -17,7 +17,7 @@ enable:
   # - luci-app-upnp
   - luci-app-wol
   - luci-app-openclash
-  - luci-app-harbor-file
+  # - luci-app-harbor-file
   - luci-mod-dashboard
   - luci-app-argon-config
 
