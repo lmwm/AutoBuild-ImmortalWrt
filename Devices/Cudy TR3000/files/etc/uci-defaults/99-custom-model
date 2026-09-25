@@ -1,0 +1,23 @@
+#!/bin/sh
+# 自定义设备型号显示（ImageBuilder 模式专用）
+#
+# 背景：ImageBuilder 不编译内核，无法像 Customize.sh 那样修改 dtb 里的
+#       model 属性（"Cudy TR3000 v1 (OpenWrt U-Boot layout)"）。
+#       这里在首次启动时（uci-defaults 只执行一次）修正用户态的设备信息，
+#       让 LuCI/状态页显示精简后的型号名。
+#
+# 影响范围：
+#   /etc/board.json       —— LuCI「主机型号」的主要来源
+#   /etc/openwrt_release  —— 固件描述信息
+#   /etc/banner           —— SSH 登录横幅
+#
+# 注意：/proc/device-tree/model（dtb 层）保持原样，那是硬件描述，
+#       与运行时显示无关，不需要也不应该在运行时修改。
+#
+# 若将来型号名变更，改下面的 sed 替换对即可。
+
+sed -i 's/Cudy TR3000 v1 (OpenWrt U-Boot layout)/Cudy TR3000/g' /etc/board.json 2>/dev/null
+sed -i 's/Cudy TR3000 v1 (OpenWrt U-Boot layout)/Cudy TR3000/g' /etc/openwrt_release 2>/dev/null
+sed -i 's/Cudy TR3000 v1 (OpenWrt U-Boot layout)/Cudy TR3000/g' /etc/banner 2>/dev/null
+
+exit 0

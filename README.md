@@ -37,8 +37,9 @@
 |------|------|--------|
 | `device` | 目标设备（下拉选择，值与 `Devices/<名>` 目录名一致） | `Cudy TR3000` |
 | `tag` | ImmortalWrt 版本标签（下拉选择） | `latest` |
-| `cache_enabled` | 启用编译缓存（ccache + 源码下载 dl） | `true` |
+| `cache_enabled` | 启用编译缓存（构建树 + ccache + 源码下载 dl） | `true` |
 | `skip_compile` | 跳过编译（调试模式） | `false` |
+| `build_mode` | 构建方式：`full`=全量编译（可改内核/DTS）；`imagebuilder`=官方 ImageBuilder 快速组装 | `full` |
 
 ### 版本标签（下拉选择，自动同步）
 
@@ -120,12 +121,17 @@
   [3.6] 同步配置（make defconfig）
   [3.7] 修复 Rust LLVM
 
-阶段 4: 编译固件
+阶段 4: 编译固件（仅 build_mode=full）
   [4.1] 预下载资源
   [4.2] 编译固件（多线程 -> 单线程 -> 详细日志三级重试）
   [4.3] 编译后磁盘使用
 
-阶段 5: 上传固件
+阶段 IB: ImageBuilder 快速构建（仅 build_mode=imagebuilder）
+  [IB.1] 下载 ImageBuilder 与 SDK（与 tag 严格对应）
+  [IB.2] SDK 编译第三方包（OpenClash/argon/argon-config/harbor-file）
+  [IB.3] 组装固件（make image，设备信息用 FILES= 覆盖）
+
+阶段 5: 上传固件（两种模式共用）
   [5.1] 整理固件（重命名：编译时间 YYYYMMDD-HHMM 前缀在最前 + 定位编译产物目录）
   [5.2] 上传 sysupgrade 固件
   [5.3] 上传 recovery/factory 固件
@@ -134,6 +140,40 @@
   [5.6] 裁剪构建树（缓存体积控制）
   [5.7] 保存构建树缓存
 ```
+
+## 构建方式：full 与 imagebuilder
+
+工作流支持两种构建方式，通过 `build_mode` 参数切换：
+
+| 方式 | 耗时 | 适用场景 | 局限 |
+|------|------|----------|------|
+| `full`（默认） | 约 3 小时（增量缓存命中后 15–30 分钟） | 改内核、改 DTS、改设备定制 | 首次全量编译慢 |
+| `imagebuilder` | **约 10–15 分钟** | 只调整软件包列表（加/删包） | 不能改内核/DTS，设备信息用 `FILES=` 覆盖 |
+
+### imagebuilder 模式的工作方式
+
+不编译内核/工具链，而是复用官方预编译产物（与 `tag` 严格对应，保证包 ABI 一致）：
+
+1. **[IB.1]** 下载 `immortalwrt-imagebuilder-<版本>-mediatek-filogic` 与对应 SDK
+2. **[IB.2]** 用 SDK 编译四个第三方包（`OpenClash`、`argon`、`argon-config`、`harbor-file`，均为 `PKGARCH:=all` 的脚本/主题包，不涉及内核 ABI），产出 `.apk` 放入 ImageBuilder 的 `packages/`
+3. **[IB.3]** `make image PROFILE=... PACKAGES="..." FILES="..."` 组装固件，`PACKAGES` 列表由 `[3.3]` 从 `Packages.yaml` 生成
+
+### 设备信息（imagebuilder 模式）
+
+`full` 模式通过 `Customize.sh` 修改 dtb 的 model 属性；`imagebuilder` 不编译内核，改为用 `FILES=` 覆盖用户态文件：
+
+```
+Devices/<设备名>/files/
+└── etc/uci-defaults/99-custom-model   # 首次启动时修正设备型号显示
+```
+
+该脚本修正 `/etc/board.json`、`/etc/openwrt_release`、`/etc/banner` 里的型号名；`/proc/device-tree/model`（dtb 层）保持原样，那是硬件描述，与运行时显示无关。
+
+### 注意事项
+
+- `imagebuilder` 模式下 `cache_enabled` 不生效（无需编译缓存），增量缓存等步骤自动跳过
+- 若目标 tag 尚未发布官方 ImageBuilder，`[IB.1]` 会报错退出，此时改用 `full` 模式
+- 内核模块类第三方包（`kmod-xxx`）需与官方内核 ABI 严格匹配；当前配置已移除 `kmod-oaf`，若将来加回请自行评估
 
 ## 配置文件说明
 

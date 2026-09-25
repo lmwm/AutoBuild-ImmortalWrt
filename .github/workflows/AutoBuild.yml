@@ -41,6 +41,14 @@ on:
         description: "跳过编译（调试模式）"
         type: boolean
         default: false
+      build_mode:
+        description: "构建方式：full=全量编译（可改内核/DTS）；imagebuilder=官方 ImageBuilder 快速组装（分钟级，设备信息用 FILES= 覆盖）"
+        type: choice
+        options:
+          - full
+          - imagebuilder
+        default: full
+        required: true
 
 env:
   TZ: Asia/Shanghai
@@ -268,6 +276,7 @@ jobs:
       # 2.4 克隆 ImmortalWrt 源码
       # ----------------------------------------------------------
       - name: "[2.4] 克隆 ImmortalWrt 源码"
+        if: ${{ inputs.build_mode == 'full' }}
         run: |
           git clone -b ${{ steps.version.outputs.tag }} \
             --single-branch --filter=blob:none \
@@ -279,6 +288,7 @@ jobs:
       # 2.5 更新 feeds
       # ----------------------------------------------------------
       - name: "[2.5] 更新 feeds"
+        if: ${{ inputs.build_mode == 'full' }}
         working-directory: immortalwrt
         run: ./scripts/feeds update -a
 
@@ -286,6 +296,7 @@ jobs:
       # 2.6 安装 feeds
       # ----------------------------------------------------------
       - name: "[2.6] 安装 feeds"
+        if: ${{ inputs.build_mode == 'full' }}
         working-directory: immortalwrt
         run: ./scripts/feeds install -a
 
@@ -310,7 +321,7 @@ jobs:
       #       它们的时间戳必须保持原样（缓存恢复出的新时间戳正是所需）。
       # ----------------------------------------------------------
       - name: "[2.7] 重置源码时间戳（增量构建）"
-        if: ${{ inputs.cache_enabled }}
+        if: ${{ inputs.build_mode == 'full' && inputs.cache_enabled }}
         run: |
           cd immortalwrt
           find . \
@@ -329,6 +340,7 @@ jobs:
       # 3.1 添加自定义软件包（git clone 等）
       # ----------------------------------------------------------
       - name: "[3.1] 添加自定义软件包"
+        if: ${{ inputs.build_mode == 'full' }}
         run: |
           DEVICE_DIR="${{ steps.device.outputs.device_dir }}"
           if [ -f "${DEVICE_DIR}/Packages.sh" ]; then
@@ -342,6 +354,7 @@ jobs:
       # 3.2 设备定制
       # ----------------------------------------------------------
       - name: "[3.2] 设备定制"
+        if: ${{ inputs.build_mode == 'full' }}
         run: |
           DEVICE_DIR="${{ steps.device.outputs.device_dir }}"
           if [ -f "${DEVICE_DIR}/Customize.sh" ]; then
@@ -365,6 +378,9 @@ jobs:
           echo "=========================================="
 
           # 创建初始配置：写入设备 TARGET
+          # （ImageBuilder 模式下 immortalwrt 目录不存在，先建目录；
+          #   此处生成的 .config 同时作为 PACKAGES 列表的载体，供 [IB.3] 提取）
+          mkdir -p immortalwrt
           if [ -n "$DEVICE_TARGET" ]; then
             echo "$DEVICE_TARGET" > immortalwrt/.config
             echo "[OK] 设置设备 TARGET: $DEVICE_TARGET"
@@ -479,6 +495,12 @@ jobs:
             echo "  + CONFIG_CCACHE_DIR=(默认 \$(TOPDIR)/.ccache)"
           fi
 
+          # 生成 PACKAGES 列表（供 ImageBuilder 模式 [IB.3] 的 make image 使用）
+          grep '^CONFIG_PACKAGE_.*=y' immortalwrt/.config \
+            | sed 's/^CONFIG_PACKAGE_//; s/=y$//' \
+            | sort -u > packages_list.txt
+          echo "[INFO] PACKAGES 列表: $(wc -l < packages_list.txt) 个包 -> packages_list.txt"
+
           echo ""
           echo "[OK] 配置文件已生成"
           echo "=========================================="
@@ -525,7 +547,7 @@ jobs:
       # ----------------------------------------------------------
       - name: "[3.3.1] 恢复构建树缓存 (build_dir + staging_dir)"
         id: cache-restore
-        if: ${{ inputs.cache_enabled }}
+        if: ${{ inputs.build_mode == 'full' && inputs.cache_enabled }}
         uses: actions/cache/restore@v4
         with:
           path: |
@@ -539,7 +561,7 @@ jobs:
       # 3.4 恢复 ccache 缓存
       # ----------------------------------------------------------
       - name: "[3.4] 恢复 ccache 缓存"
-        if: ${{ inputs.cache_enabled }}
+        if: ${{ inputs.build_mode == 'full' && inputs.cache_enabled }}
         uses: actions/cache@v4
         with:
           path: immortalwrt/.ccache
@@ -548,7 +570,7 @@ jobs:
             ccache-${{ runner.os }}-${{ steps.device.outputs.platform }}-
 
       - name: "[3.5] 恢复源码下载缓存 (dl)"
-        if: ${{ inputs.cache_enabled }}
+        if: ${{ inputs.build_mode == 'full' && inputs.cache_enabled }}
         uses: actions/cache@v4
         with:
           path: immortalwrt/dl
@@ -580,7 +602,7 @@ jobs:
       #       会被恢复出来的旧缓存覆盖。
       # ----------------------------------------------------------
       - name: "[3.5.1] 配置 ccache 校验方式"
-        if: ${{ inputs.cache_enabled }}
+        if: ${{ inputs.build_mode == 'full' && inputs.cache_enabled }}
         run: |
           mkdir -p immortalwrt/.ccache
           cat > immortalwrt/.ccache/ccache.conf <<'EOF'
@@ -600,6 +622,7 @@ jobs:
       # 3.6 同步配置
       # ----------------------------------------------------------
       - name: "[3.6] 同步配置 (defconfig)"
+        if: ${{ inputs.build_mode == 'full' }}
         working-directory: immortalwrt
         run: make defconfig
 
@@ -607,6 +630,7 @@ jobs:
       # 3.7 修复 Rust LLVM 下载问题
       # ----------------------------------------------------------
       - name: "[3.7] 修复 Rust LLVM CI 下载"
+        if: ${{ inputs.build_mode == 'full' }}
         run: |
           RUST_MAKEFILE="immortalwrt/feeds/packages/lang/rust/Makefile"
           if [ -f "$RUST_MAKEFILE" ]; then
@@ -625,7 +649,7 @@ jobs:
       # 4.1 预下载资源
       # ----------------------------------------------------------
       - name: "[4.1] 预下载资源"
-        if: ${{ !inputs.skip_compile }}
+        if: ${{ inputs.build_mode == 'full' && !inputs.skip_compile }}
         working-directory: immortalwrt
         run: |
           echo "多线程下载: -j$(nproc)"
@@ -638,7 +662,7 @@ jobs:
       # 4.2 编译固件
       # ----------------------------------------------------------
       - name: "[4.2] 编译固件"
-        if: ${{ !inputs.skip_compile }}
+        if: ${{ inputs.build_mode == 'full' && !inputs.skip_compile }}
         id: compile
         working-directory: immortalwrt
         run: |
@@ -691,7 +715,7 @@ jobs:
       # 4.3 编译后磁盘使用
       # ----------------------------------------------------------
       - name: "[4.3] 编译后磁盘使用"
-        if: ${{ !inputs.skip_compile && !cancelled() }}
+        if: ${{ inputs.build_mode == 'full' && !inputs.skip_compile && !cancelled() }}
         run: |
           echo "=========================================="
           echo "  编译后磁盘使用"
@@ -712,6 +736,105 @@ jobs:
           echo "=========================================="
 
       # ===========================================================
+      # 阶段 IB: ImageBuilder 快速构建（build_mode=imagebuilder）
+      #
+      # 与全量编译互斥。不编译内核/工具链，而是下载官方 ImageBuilder 与
+      # SDK（与 tag 严格对应，保证包 ABI 一致）：
+      #   [IB.1] 下载并解压 ImageBuilder 与 SDK
+      #   [IB.2] 用 SDK 编译第三方包（OpenClash/argon/argon-config/
+      #          harbor-file，均为 PKGARCH:=all 的脚本/主题包，无内核 ABI
+      #          问题），产出 .apk 放入 ImageBuilder 的 packages/
+      #   [IB.3] make image 组装固件；设备信息用 FILES= 目录覆盖（不改
+      #          dtb，只覆盖用户态文件 + uci-defaults 运行时修正显示）
+      #
+      # 预期总耗时 10-15 分钟。输出目录与全量编译一致
+      # （bin/targets/<平台>/），因此 [5.x] 上传可共用。
+      # ===========================================================
+
+      # ----------------------------------------------------------
+      # IB.1 下载 ImageBuilder 与 SDK
+      # ----------------------------------------------------------
+      - name: "[IB.1] 下载 ImageBuilder 与 SDK"
+        if: ${{ inputs.build_mode == 'imagebuilder' }}
+        run: |
+          VER="${{ steps.version.outputs.tag }}"
+          VER_RAW="${VER#v}"
+          DEVICE_TARGET="${{ steps.device.outputs.target }}"
+          TARGET_PART=$(echo "$DEVICE_TARGET" | sed 's/CONFIG_TARGET_//' | sed 's/_DEVICE_.*//')
+          PLATFORM_PATH=$(echo "$TARGET_PART" | sed 's/_/\//g')
+          BASE_URL="https://downloads.immortalwrt.org/releases/${VER_RAW}/targets/${PLATFORM_PATH}"
+          echo "[INFO] 下载源: $BASE_URL"
+
+          IB_FILE=$(curl -fsSL "$BASE_URL/" | grep -oE 'immortalwrt-imagebuilder-[^"]+\.tar\.zst' | head -1)
+          SDK_FILE=$(curl -fsSL "$BASE_URL/" | grep -oE 'immortalwrt-sdk-[^"]+\.tar\.zst' | head -1)
+          if [ -z "$IB_FILE" ] || [ -z "$SDK_FILE" ]; then
+            echo "[ERROR] 未在 $BASE_URL/ 找到 ImageBuilder 或 SDK（该 tag 可能未发布官方产物）"
+            exit 1
+          fi
+
+          curl -fL -o "$IB_FILE" "$BASE_URL/$IB_FILE"
+          curl -fL -o "$SDK_FILE" "$BASE_URL/$SDK_FILE"
+          tar --zstd -xf "$IB_FILE"
+          tar --zstd -xf "$SDK_FILE"
+          mv immortalwrt-imagebuilder-* ib
+          mv immortalwrt-sdk-* sdk
+          echo "[OK] ImageBuilder: $IB_FILE"
+          echo "[OK] SDK: $SDK_FILE"
+          echo "PLATFORM_PATH=$PLATFORM_PATH" >> $GITHUB_ENV
+
+      # ----------------------------------------------------------
+      # IB.2 SDK 编译第三方包
+      #
+      # Packages.sh 依赖 $OPENWRT_DIR=pwd，SDK 的目录结构与源码树兼容，
+      # 可直接复用。四个第三方包都是 PKGARCH:=all（脚本/主题），
+      # 不涉及内核 ABI，编译只需一两分钟。
+      # ----------------------------------------------------------
+      - name: "[IB.2] SDK 编译第三方包"
+        if: ${{ inputs.build_mode == 'imagebuilder' }}
+        run: |
+          DEVICE_DIR="${{ steps.device.outputs.device_dir }}"
+          cd sdk
+          cp "$DEVICE_DIR/Packages.sh" .
+          bash Packages.sh
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          {
+            echo "CONFIG_PACKAGE_luci-app-openclash=y"
+            echo "CONFIG_PACKAGE_luci-theme-argon=y"
+            echo "CONFIG_PACKAGE_luci-app-argon-config=y"
+            echo "CONFIG_PACKAGE_luci-app-harbor-file=y"
+          } > .config
+          make defconfig
+          make package/luci-app-openclash/compile -j"$(nproc)"
+          make package/luci-theme-argon/compile -j"$(nproc)"
+          make package/luci-app-argon-config/compile -j"$(nproc)"
+          make package/luci-app-harbor-file/compile -j"$(nproc)"
+          mkdir -p ../ib/packages
+          find bin/packages -name '*.apk' -exec cp -v {} ../ib/packages/ \;
+          echo "[OK] 第三方包产物:"
+          ls -1 ../ib/packages/
+
+      # ----------------------------------------------------------
+      # IB.3 组装固件（make image）
+      #
+      # PACKAGES 列表由 [3.3] 从 Packages.yaml 生成（packages_list.txt）。
+      # FILES= 指向 Devices/<设备>/files，内容在运行时覆盖用户态设备信息。
+      # ----------------------------------------------------------
+      - name: "[IB.3] 组装固件 (make image)"
+        if: ${{ inputs.build_mode == 'imagebuilder' }}
+        run: |
+          DEVICE_DIR="${{ steps.device.outputs.device_dir }}"
+          DEVICE_TARGET="${{ steps.device.outputs.target }}"
+          PROFILE=$(echo "$DEVICE_TARGET" | sed 's/.*_DEVICE_//' | sed 's/=y$//')
+          PACKAGES_LIST=$(tr '\n' ' ' < packages_list.txt)
+          cd ib
+          echo "[INFO] PROFILE=$PROFILE"
+          echo "[INFO] PACKAGES=$PACKAGES_LIST"
+          make image PROFILE="$PROFILE" PACKAGES="$PACKAGES_LIST" FILES="$DEVICE_DIR/files"
+          echo "[OK] ImageBuilder 构建完成"
+          find bin/targets -type f | head -20
+
+      # ===========================================================
       # 阶段 5: 上传固件
       # ===========================================================
 
@@ -725,7 +848,7 @@ jobs:
       # ----------------------------------------------------------
       - name: "[5.1] 整理固件"
         id: organize
-        if: ${{ !inputs.skip_compile && steps.compile.outputs.status == 'success' && !cancelled() }}
+        if: ${{ !inputs.skip_compile && !cancelled() && (inputs.build_mode == 'imagebuilder' || steps.compile.outputs.status == 'success') }}
         run: |
           MODEL="${{ steps.device.outputs.model }}"
           VERSION="${{ steps.version.outputs.tag }}"
@@ -734,6 +857,13 @@ jobs:
           # 固件文件名保留型号原有空格（Cudy TR3000-...）
           DEVICE_ID=$(echo "$MODEL" | tr -d ' ' | tr -cd 'A-Za-z0-9._-')
           BUILD_ID=$(head -1 immortalwrt/version 2>/dev/null || echo "unknown")
+          # 双模式产物根目录：full 模式在源码树，imagebuilder 模式在 ImageBuilder 目录
+          if [ "${{ inputs.build_mode }}" = "imagebuilder" ]; then
+            BUILD_ROOT="ib"
+          else
+            BUILD_ROOT="immortalwrt"
+          fi
+          BIN_ROOT="$BUILD_ROOT/bin"
           # 编译时刻（YYYYMMDD-HHMM），时区由 job 的 env.TZ 决定（当前 Asia/Shanghai）
           # 该前缀放在文件名最前，便于按编译先后排序
           DATE_STR=$(date +%Y%m%d-%H%M)
@@ -752,7 +882,7 @@ jobs:
             TARGET_PART=$(echo "$DEVICE_TARGET" | sed 's/CONFIG_TARGET_//' | sed 's/_DEVICE_.*//')
             # 将下划线转换为斜杠: mediatek_filogic -> mediatek/filogic
             PLATFORM_PATH=$(echo "$TARGET_PART" | sed 's/_/\//g')
-            ARTIFACT_DIR="immortalwrt/bin/targets/${PLATFORM_PATH}"
+            ARTIFACT_DIR="$BIN_ROOT/targets/${PLATFORM_PATH}"
             echo "[INFO] 从 TARGET 推断产物目录: ${ARTIFACT_DIR}"
           else
             ARTIFACT_DIR=""
@@ -765,10 +895,10 @@ jobs:
             FW_FILES=$(find "$ARTIFACT_DIR" -maxdepth 1 -type f \( -name "*.itb" -o -name "*.bin" -o -name "*.img.gz" -o -name "*.squashfs" \) 2>/dev/null | grep -E "(sysupgrade|recovery|factory)" || true)
           else
             # 搜索整个 targets 目录
-            FW_FILES=$(find immortalwrt/bin/targets -type f \( -name "*.itb" -o -name "*.bin" -o -name "*.img.gz" -o -name "*.squashfs" \) 2>/dev/null | grep -E "(sysupgrade|recovery|factory)" || true)
+            FW_FILES=$(find $BIN_ROOT/targets -type f \( -name "*.itb" -o -name "*.bin" -o -name "*.img.gz" -o -name "*.squashfs" \) 2>/dev/null | grep -E "(sysupgrade|recovery|factory)" || true)
             if [ -z "$FW_FILES" ]; then
               # 回退：用第一个 sysupgrade 产物推断目录
-              ARTIFACT_DIR=$(dirname "$(find immortalwrt/bin/targets -type f -name "*sysupgrade*" 2>/dev/null | head -1)" 2>/dev/null || true)
+              ARTIFACT_DIR=$(dirname "$(find $BIN_ROOT/targets -type f -name "*sysupgrade*" 2>/dev/null | head -1)" 2>/dev/null || true)
               echo "[WARN] 回退推断产物目录: ${ARTIFACT_DIR}"
             fi
           fi
@@ -777,7 +907,7 @@ jobs:
             echo "[ERROR] 未找到固件文件"
             echo "期望目录: ${ARTIFACT_DIR}"
             echo "目录结构:"
-            find immortalwrt/bin/targets -type f 2>/dev/null | head -20
+            find $BIN_ROOT/targets -type f 2>/dev/null | head -20
             exit 1
           fi
 
@@ -818,14 +948,14 @@ jobs:
           fi
 
           # 整个 bin 输出目录：供 5.5 整体上传，必须存在
-          if [ -d immortalwrt/bin ]; then
-            echo "[OK] bin 输出目录: immortalwrt/bin"
+          if [ -d "$BIN_ROOT" ]; then
+            echo "[OK] bin 输出目录: $BIN_ROOT"
             echo "bin 顶层内容:"
-            ls -1 immortalwrt/bin | sed 's|^|  |'
-            echo "bin 文件总数: $(find immortalwrt/bin -type f 2>/dev/null | wc -l)"
-            echo "bin 总体积: $(du -sh immortalwrt/bin 2>/dev/null | cut -f1)"
+            ls -1 "$BIN_ROOT" | sed 's|^|  |'
+            echo "bin 文件总数: $(find "$BIN_ROOT" -type f 2>/dev/null | wc -l)"
+            echo "bin 总体积: $(du -sh "$BIN_ROOT" 2>/dev/null | cut -f1)"
           else
-            echo "[ERROR] bin 输出目录不存在，无法上传完整产物: immortalwrt/bin"
+            echo "[ERROR] bin 输出目录不存在，无法上传完整产物: $BIN_ROOT"
             exit 1
           fi
 
@@ -834,7 +964,7 @@ jobs:
           echo "=========================================="
 
           echo "FIRMWARE=$STAGE_DIR" >> $GITHUB_ENV
-          echo "BIN_DIR=immortalwrt/bin" >> $GITHUB_ENV
+          echo "BIN_DIR=$BIN_ROOT" >> $GITHUB_ENV
           echo "ARTIFACT_DIR=$ARTIFACT_DIR" >> $GITHUB_ENV
           echo "device_id=${DEVICE_ID}" >> $GITHUB_OUTPUT
           # 供 5.2-5.5 的 Artifact 名称使用，与固件文件名前缀保持一致
@@ -915,7 +1045,7 @@ jobs:
       #   - 打包所需的 ipkg-* 产物目录与 stamp 一律保留
       # ----------------------------------------------------------
       - name: "[5.6] 裁剪构建树（缓存体积控制）"
-        if: ${{ inputs.cache_enabled && !cancelled() }}
+        if: ${{ inputs.build_mode == 'full' && inputs.cache_enabled && !cancelled() }}
         run: |
           echo "[裁剪] 之前: build_dir $(du -sh immortalwrt/build_dir 2>/dev/null | cut -f1)"
           # 中间目标文件与依赖缓存（stamp 保证不会重编；需要时 ccache 秒回）
@@ -932,7 +1062,7 @@ jobs:
       # 若体积超过 GitHub 缓存上限，此处会提示超限但不影响编译产物。
       # ----------------------------------------------------------
       - name: "[5.7] 保存构建树缓存"
-        if: ${{ inputs.cache_enabled && !cancelled() }}
+        if: ${{ inputs.build_mode == 'full' && inputs.cache_enabled && !cancelled() }}
         uses: actions/cache/save@v4
         with:
           path: |
