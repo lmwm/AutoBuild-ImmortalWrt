@@ -22,10 +22,17 @@ BLOCK_HEAD = '      tag:\n'
 OPTIONS_KEY = '        options:\n'
 ITEM_INDENT = '          '
 
-# 所有输入项名称，用于校验更新后没有丢项
+# 所有输入项名称，用于校验更新后输入项集合未被改动
 # 注意：此列表必须与 AutoBuild.yml 的 workflow_dispatch.inputs 保持一致，
 #       增删输入项时需同步修改，否则本脚本会在写回校验时失败退出。
-EXPECTED_INPUTS = ('device', 'tag', 'cache_enabled', 'skip_compile')
+EXPECTED_INPUTS = (
+    'device',
+    'tag',
+    'cache_enabled',
+    'skip_compile',
+    'build_mode',
+    'ruby_yjit',
+)
 
 
 def build_pattern():
@@ -104,10 +111,23 @@ def main() -> int:
         print('[ERROR] tag.default 被意外改动')
         return 1
 
-    for name in EXPECTED_INPUTS:
-        if name not in inputs:
-            print('[ERROR] 输入项 %s 丢失' % name)
-            return 1
+    # 双向校验输入项集合：既查丢失，也查新增/改名。
+    # 只查「丢失」会漏掉两类问题：新增输入项后忘记同步本列表（漏检），
+    # 以及输入项被改名（旧名消失、新名出现，同样应显式暴露）。
+    actual = set(inputs)
+    expected = set(EXPECTED_INPUTS)
+
+    missing = sorted(expected - actual)
+    unexpected = sorted(actual - expected)
+
+    if missing:
+        print('[ERROR] 输入项丢失: %s' % ', '.join(missing))
+        return 1
+
+    if unexpected:
+        print('[ERROR] 出现未登记的输入项: %s' % ', '.join(unexpected))
+        print('        请同步更新 SyncTags.py 的 EXPECTED_INPUTS')
+        return 1
 
     with open(build_path, 'w', encoding='utf-8', newline='\n') as f:
         f.write(updated)

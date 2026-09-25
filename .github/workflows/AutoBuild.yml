@@ -550,7 +550,6 @@ jobs:
       # 旧条目由 GitHub 的 10GB 配额 LRU 自动淘汰。
       # ----------------------------------------------------------
       - name: "[3.3.1] 恢复构建树缓存 (build_dir + staging_dir)"
-        id: cache-restore
         if: ${{ inputs.build_mode == 'full' && inputs.cache_enabled }}
         uses: actions/cache/restore@v4
         with:
@@ -780,9 +779,9 @@ jobs:
       # 与全量编译互斥。不编译内核/工具链，而是下载官方 ImageBuilder 与
       # SDK（与 tag 严格对应，保证包 ABI 一致）：
       #   [IB.1] 下载并解压 ImageBuilder 与 SDK
-      #   [IB.2] 用 SDK 编译第三方包（OpenClash/argon/argon-config/
-      #          harbor-file，均为 PKGARCH:=all 的脚本/主题包，无内核 ABI
-      #          问题），产出 .apk 放入 ImageBuilder 的 packages/
+      #   [IB.2] 用 SDK 编译 Packages.sh 实际克隆的第三方包（多为
+      #          PKGARCH:=all 的脚本/主题包，无内核 ABI 问题），产出 .apk
+      #          放入 ImageBuilder 的 packages/；未克隆任何包时整步跳过
       #   [IB.3] make image 组装固件；设备信息用 FILES= 目录覆盖（不改
       #          dtb，只覆盖用户态文件 + uci-defaults 运行时修正显示）
       #
@@ -1000,7 +999,30 @@ jobs:
           # 设备标识：去掉空格，仅用于 Artifact 名称（下载的 zip 文件名不带空格）
           # 固件文件名保留型号原有空格（Cudy TR3000-...）
           DEVICE_ID=$(echo "$MODEL" | tr -d ' ' | tr -cd 'A-Za-z0-9._-')
-          BUILD_ID=$(head -1 immortalwrt/version 2>/dev/null || echo "unknown")
+          # 构建号：优先源码树根目录的 version 文件（full 模式由 make 生成）。
+          # imagebuilder 模式从不执行 make，该文件不存在，改从 ImageBuilder 的
+          # include/version.mk 取 REVISION——注意不能取 VERSION_CODE：
+          # 上游模板里 VERSION_CODE 是 `$(call qstrip,$(CONFIG_VERSION_CODE))`
+          # 这样的 make 表达式（含 $、括号、逗号），直接塞进文件名会得到
+          # 非法名称；而 REVISION 在打包时被
+          # `$(SED) 's,^# REVISION:=.*,REVISION:=$(REVISION),g'` 替换成真实
+          # 字面值（形如 r38135-0c4cd0f9920a），可直接用于文件名。
+          # 已按 ImmortalWrt v25.12.2 的 target/imagebuilder/Makefile 核实。
+          # 两者都取不到时兜底用版本标签，避免出现无意义的 "unknown"。
+          BUILD_ID=""
+          if [ -f immortalwrt/version ]; then
+            BUILD_ID=$(head -1 immortalwrt/version 2>/dev/null | tr -d '[:space:]' || true)
+          fi
+          if [ -z "$BUILD_ID" ] && [ -f ib/include/version.mk ]; then
+            BUILD_ID=$(sed -n 's/^REVISION:=//p' ib/include/version.mk | head -1 | tr -d '[:space:]')
+          fi
+          # 兜底校验：文件名里不能出现 / $ ( ) , 空格与引号
+          BUILD_ID=$(printf '%s' "$BUILD_ID" | tr -cd 'A-Za-z0-9._+-')
+          if [ -z "$BUILD_ID" ]; then
+            echo "[WARN] 未取到构建号，回退为版本标签: $VERSION"
+            BUILD_ID="$VERSION"
+          fi
+          echo "[INFO] 构建号: $BUILD_ID"
           # 双模式产物根目录：full 模式在源码树，imagebuilder 模式在 ImageBuilder 目录
           if [ "${{ inputs.build_mode }}" = "imagebuilder" ]; then
             BUILD_ROOT="ib"
@@ -1077,9 +1099,17 @@ jobs:
           echo "[OK] 共处理 $(printf '%s\n' "$FW_FILES" | grep -c . || true) 个固件"
 
           # 复制配置文件（编译时间在最前，与固件命名规则保持一致）
-          CP_NAME="${DATE_STR}-${MODEL}-ImmortalWrt-V${VERSION_RAW}-${BUILD_ID}-config.config"
-          cp immortalwrt/.config "$STAGE_DIR/$CP_NAME"
-          echo "[FILE] .config -> $CP_NAME"
+          # 该文件由 [3.3] 生成；imagebuilder 模式下 [3.3] 会先 mkdir -p
+          # immortalwrt 再写入，因此这里通常存在。加存在性判断是为了不依赖
+          # 那个隐晦的前置关系——若将来 [3.3] 改成只在 full 模式执行，
+          # 这里应给出明确提示，而不是以 cp 报错收场。
+          if [ -f immortalwrt/.config ]; then
+            CP_NAME="${DATE_STR}-${MODEL}-ImmortalWrt-V${VERSION_RAW}-${BUILD_ID}-config.config"
+            cp immortalwrt/.config "$STAGE_DIR/$CP_NAME"
+            echo "[FILE] .config -> $CP_NAME"
+          else
+            echo "[WARN] 未找到 immortalwrt/.config，跳过配置文件上传"
+          fi
 
           # 本平台产物目录：仅用于打印清单与健全性校验
           if [ -n "$ARTIFACT_DIR" ] && [ -d "$ARTIFACT_DIR" ]; then
@@ -1187,14 +1217,19 @@ jobs:
       #   - 删除 *.o 等中间目标文件后，make 仍会因 stamp 存在而跳过编译
       #   - 万一某包需要重编，ccache 命中率 99.99%，可秒回这些 .o
       #   - 打包所需的 ipkg-* 产物目录与 stamp 一律保留
+      #
+      # 刻意不删 *.tmp / .tmp：这两类名字无法区分「可丢弃的临时产物」与
+      # 「构建过程需要的中间文件」，误删的代价（重编甚至构建失败）远高于
+      # 它们占用的体积。裁剪主要靠 *.o（体积大头），这类小文件留着更稳。
       # ----------------------------------------------------------
       - name: "[5.6] 裁剪构建树（缓存体积控制）"
         if: ${{ inputs.build_mode == 'full' && inputs.cache_enabled && !cancelled() }}
         run: |
           echo "[裁剪] 之前: build_dir $(du -sh immortalwrt/build_dir 2>/dev/null | cut -f1)"
-          # 中间目标文件与依赖缓存（stamp 保证不会重编；需要时 ccache 秒回）
-          find immortalwrt/build_dir -type f \( -name '*.o' -o -name '*.lo' -o -name '*.obj' -o -name '*.tmp' -o -name 'core.*' \) -delete 2>/dev/null || true
-          find immortalwrt/build_dir -type d \( -name '.deps' -o -name '.tmp' \) -exec rm -rf {} + 2>/dev/null || true
+          # 只删确定可再生的大件：目标文件与依赖缓存
+          #（stamp 保证不会重编；真需要重编时 ccache 秒回）
+          find immortalwrt/build_dir -type f \( -name '*.o' -o -name '*.lo' -o -name '*.obj' -o -name 'core.*' \) -delete 2>/dev/null || true
+          find immortalwrt/build_dir -type d -name '.deps' -exec rm -rf {} + 2>/dev/null || true
           echo "[裁剪] 之后: build_dir $(du -sh immortalwrt/build_dir 2>/dev/null | cut -f1)"
           echo "[裁剪] 之后: staging_dir $(du -sh immortalwrt/staging_dir 2>/dev/null | cut -f1)"
 
