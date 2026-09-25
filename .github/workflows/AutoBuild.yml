@@ -49,6 +49,10 @@ on:
           - imagebuilder
         default: full
         required: true
+      ruby_yjit:
+        description: "启用 ruby YJIT（仅 full 模式有效；关闭可甩掉整个 Rust/LLVM 工具链，省 60-130 分钟）"
+        type: boolean
+        default: true
 
 env:
   TZ: Asia/Shanghai
@@ -617,6 +621,41 @@ jobs:
           EOF
           echo "[缓存] ccache 配置:"
           cat immortalwrt/.ccache/ccache.conf
+
+      # ----------------------------------------------------------
+      # 3.5.2 ruby YJIT 开关（可选禁用，仅 full 模式）
+      #
+      # 背景：ruby 的 RUBY_ENABLE_YJIT 默认为 y（aarch64/x86_64 适用），
+      #       而 YJIT 是用 Rust 实现的 JIT 编译器，其构建依赖
+      #       PKG_BUILD_DEPENDS: RUBY_ENABLE_YJIT:rust/host —— 会拉入整个
+      #       Rust/LLVM 工具链。实测 ruby + rust 合计占编译时间约 77%
+      #       （ruby 131 分钟 + rust 与其并行）。而 OpenClash 只用 ruby 跑
+      #       订阅规则转换等一次性短脚本，JIT 加速没有收益。
+      #
+      # 做法（双保险，确保 make defconfig 不会把它重新打开）：
+      #   1) 把 Makefile 中 RUBY_ENABLE_YJIT 的 default y 改为 default n
+      #   2) 在 .config 显式写入 "# CONFIG_RUBY_ENABLE_YJIT is not set"
+      #
+      # 位置：必须在 [3.3] 生成 .config 之后、[3.6] defconfig 之前。
+      #       依赖解析发生在 defconfig，晚于它就拦不住 rust/host 的拉入。
+      # ----------------------------------------------------------
+      - name: "[3.5.2] 配置 ruby YJIT"
+        if: ${{ inputs.build_mode == 'full' }}
+        run: |
+          if [ "${{ inputs.ruby_yjit }}" = "false" ]; then
+            RUBY_MK="immortalwrt/feeds/packages/lang/ruby/Makefile"
+            if [ -f "$RUBY_MK" ]; then
+              awk '/config RUBY_ENABLE_YJIT/{f=1} f&&/default y/{sub(/default y/,"default n");f=0} {print}' "$RUBY_MK" > "$RUBY_MK.tmp" && mv "$RUBY_MK.tmp" "$RUBY_MK"
+              echo "[OK] RUBY_ENABLE_YJIT 默认值已改为 n:"
+              grep -A6 'config RUBY_ENABLE_YJIT' "$RUBY_MK" | grep -E 'config RUBY|default' | sed 's|^|  |'
+            else
+              echo "[WARN] 未找到 $RUBY_MK，仅在 .config 中禁用"
+            fi
+            echo "# CONFIG_RUBY_ENABLE_YJIT is not set" >> immortalwrt/.config
+            echo "[OK] 已禁用 ruby YJIT（不再拉入 Rust/LLVM 工具链）"
+          else
+            echo "[INFO] ruby YJIT 保持启用（需要 Rust/LLVM 工具链，约 60-130 分钟）"
+          fi
 
       # ----------------------------------------------------------
       # 3.6 同步配置

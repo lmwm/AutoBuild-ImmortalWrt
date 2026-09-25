@@ -40,6 +40,7 @@
 | `cache_enabled` | 启用编译缓存（构建树 + ccache + 源码下载 dl） | `true` |
 | `skip_compile` | 跳过编译（调试模式） | `false` |
 | `build_mode` | 构建方式：`full`=全量编译（可改内核/DTS）；`imagebuilder`=官方 ImageBuilder 快速组装 | `full` |
+| `ruby_yjit` | 启用 ruby YJIT（仅 `full` 模式有效；关闭可甩掉整个 Rust/LLVM 工具链，省 60–130 分钟） | `true` |
 
 ### 版本标签（下拉选择，自动同步）
 
@@ -118,6 +119,7 @@
   [3.4] 恢复 ccache 缓存（可选）
   [3.5] 恢复源码下载缓存（可选）
   [3.5.1] 配置 ccache 校验方式（可选）
+  [3.5.2] 配置 ruby YJIT（ruby_yjit=false 时禁用，甩掉 Rust 工具链）
   [3.6] 同步配置（make defconfig）
   [3.7] 修复 Rust LLVM
 
@@ -174,6 +176,17 @@ Devices/<设备名>/files/
 - `imagebuilder` 模式下 `cache_enabled` 不生效（无需编译缓存），增量缓存等步骤自动跳过
 - 若目标 tag 尚未发布官方 ImageBuilder，`[IB.1]` 会报错退出，此时改用 `full` 模式
 - 内核模块类第三方包（`kmod-xxx`）需与官方内核 ABI 严格匹配；当前配置已移除 `kmod-oaf`，若将来加回请自行评估
+
+### ruby YJIT 开关（`ruby_yjit`，仅 full 模式）
+
+`luci-app-openclash` 依赖 `ruby`，而 ruby 的 `RUBY_ENABLE_YJIT` 在 aarch64 上默认开启；YJIT 是用 Rust 实现的 JIT 编译器，其构建依赖 `PKG_BUILD_DEPENDS: RUBY_ENABLE_YJIT:rust/host`，会拉入整个 Rust/LLVM 工具链。实测 **ruby + rust 合计占编译时间约 77%**（ruby 131 分钟 + rust 与其并行）。
+
+OpenClash 只用 ruby 跑订阅规则转换等一次性短脚本，JIT 加速没有收益。把 `ruby_yjit` 设为 `false` 后，`[3.5.2]` 会：
+
+1. 把 `feeds/packages/lang/ruby/Makefile` 中 `RUBY_ENABLE_YJIT` 的 `default y` 改为 `default n`
+2. 在 `.config` 显式写入 `# CONFIG_RUBY_ENABLE_YJIT is not set`
+
+两者都必须在 `[3.6]` defconfig **之前**完成——依赖解析发生在 defconfig，晚了就拦不住 `rust/host` 被拉入构建图。`imagebuilder` 模式用官方预编译的 ruby 包，不受此开关影响。
 
 ## 配置文件说明
 
