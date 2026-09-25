@@ -857,8 +857,13 @@ jobs:
       # IB.2 SDK 编译第三方包
       #
       # Packages.sh 依赖 $OPENWRT_DIR=pwd，SDK 的目录结构与源码树兼容，
-      # 可直接复用。四个第三方包都是 PKGARCH:=all（脚本/主题），
-      # 不涉及内核 ABI，编译只需一两分钟。
+      # 可直接复用。第三方包多为 PKGARCH:=all（脚本/主题），不涉及内核 ABI。
+      #
+      # 编译范围由 Packages.sh 决定，不在本文件硬编码包名：
+      # 此前这里写死四个包名，一旦 Packages.sh 里的克隆被注释掉，仍会执行
+      # make package/<包>/compile 并报 build failed（2026-09-25 实测）。
+      # 现在改为「Packages.sh 克隆了什么就编译什么」，未克隆任何包时整步跳过，
+      # 由 [IB.3] 直接从官方源安装。以后增删第三方包只需改 Devices/ 下的配置。
       # ----------------------------------------------------------
       - name: "[IB.2] SDK 编译第三方包"
         if: ${{ inputs.build_mode == 'imagebuilder' }}
@@ -883,19 +888,54 @@ jobs:
           # find 因此有目录可扫（SDK 初始状态并没有这个目录）。
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-          bash Packages.sh
 
-          {
-            echo "CONFIG_PACKAGE_luci-app-openclash=y"
-            echo "CONFIG_PACKAGE_luci-theme-argon=y"
-            echo "CONFIG_PACKAGE_luci-app-argon-config=y"
-            echo "CONFIG_PACKAGE_luci-app-harbor-file=y"
-          } > .config
+          # ---- 识别 Packages.sh 实际克隆进来的包 ----
+          # 用「执行前后 package/ 下 Makefile 集合的差集」定位新增文件，
+          # 不依赖 Packages.sh 把包克隆到哪个目录，也不依赖包名约定。
+          find package -name Makefile -type f 2>/dev/null | LC_ALL=C sort > /tmp/pkg_before.txt
+          bash Packages.sh
+          find package -name Makefile -type f 2>/dev/null | LC_ALL=C sort > /tmp/pkg_after.txt
+          NEW_MKS=$(comm -13 /tmp/pkg_before.txt /tmp/pkg_after.txt || true)
+
+          PKG_TARGETS=""
+          PKG_LIST=""
+          while IFS= read -r mk; do
+            [ -n "$mk" ] || continue
+            # 只认真正的包定义：含 BuildPackage，或 include 了 package.mk / luci.mk。
+            # 这一条用于排除仓库里附带的纯工具 Makefile，例如 OpenClash 的
+            # luci-app-openclash/tools/po2lmo/Makefile（它不含包定义，若被当成
+            # 包处理会取错名字）。
+            grep -qE 'BuildPackage|/package\.mk|/luci\.mk' "$mk" 2>/dev/null || continue
+            # 取包名：优先 Makefile 里的 PKG_NAME:=，否则回退为所在目录名
+            #（luci.mk 中 LUCI_NAME?=$(notdir ${CURDIR})、PKG_NAME?=$(LUCI_NAME)，
+            #   因此目录名就是包名）。
+            name=$(sed -n 's/^[[:space:]]*PKG_NAME[[:space:]]*:*=[[:space:]]*//p' "$mk" | head -1)
+            [ -n "$name" ] || name=$(basename "$(dirname "$mk")")
+            PKG_TARGETS="$PKG_TARGETS package/$name/compile"
+            PKG_LIST="$PKG_LIST $name"
+          done <<< "$NEW_MKS"
+
+          if [ -z "$PKG_TARGETS" ]; then
+            echo "[INFO] Packages.sh 未克隆任何第三方包，跳过 SDK 编译"
+            echo "[INFO] [IB.3] 将直接从官方软件源安装对应软件包"
+            mkdir -p ../ib/packages
+            exit 0
+          fi
+
+          echo "[INFO] 待编译的第三方包:${PKG_LIST}"
+
+          # 仅启用识别出的包，避免把不存在的包写进 .config
+          : > .config
+          for t in $PKG_TARGETS; do
+            name=${t#package/}
+            name=${name%/compile}
+            echo "CONFIG_PACKAGE_${name}=y" >> .config
+          done
           make defconfig
-          make package/luci-app-openclash/compile -j"$(nproc)"
-          make package/luci-theme-argon/compile -j"$(nproc)"
-          make package/luci-app-argon-config/compile -j"$(nproc)"
-          make package/luci-app-harbor-file/compile -j"$(nproc)"
+
+          # shellcheck disable=SC2086  # PKG_TARGETS 需要按空格分词传入
+          make $PKG_TARGETS -j"$(nproc)"
+
           mkdir -p ../ib/packages
           find bin/packages -name '*.apk' -exec cp -v {} ../ib/packages/ \;
           echo "[OK] 第三方包产物:"
