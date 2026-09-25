@@ -864,11 +864,27 @@ jobs:
         if: ${{ inputs.build_mode == 'imagebuilder' }}
         run: |
           DEVICE_DIR="${{ steps.device.outputs.device_dir }}"
+          # 必须用绝对路径：本步骤随后 cd 到 sdk，相对路径 Devices/... 会
+          # 变成 sdk/Devices/...，导致 cp 报 cannot stat 而失败。
+          DEVICE_ABS="$GITHUB_WORKSPACE/$DEVICE_DIR"
+          if [ ! -f "$DEVICE_ABS/Packages.sh" ]; then
+            echo "::error::未找到 $DEVICE_ABS/Packages.sh"
+            exit 1
+          fi
           cd sdk
-          cp "$DEVICE_DIR/Packages.sh" .
-          bash Packages.sh
+          cp "$DEVICE_ABS/Packages.sh" .
+
+          # 顺序很重要：先 feeds update/install，再执行 Packages.sh，与 full 模式的
+          # [2.6] -> [3.1] 保持一致。Packages.sh 的职责是「先删掉 feeds 中的旧版本
+          # 符号链接，再克隆自定义版本」；若顺序颠倒，feeds install 会把
+          # package/feeds/luci/luci-theme-argon 之类的链接重新装回来，既让
+          # Packages.sh 的删除动作落空，也让同名包出现两份定义。
+          # 附带好处：feeds install 会创建 package/feeds/，Packages.sh 里的
+          # find 因此有目录可扫（SDK 初始状态并没有这个目录）。
           ./scripts/feeds update -a
           ./scripts/feeds install -a
+          bash Packages.sh
+
           {
             echo "CONFIG_PACKAGE_luci-app-openclash=y"
             echo "CONFIG_PACKAGE_luci-theme-argon=y"
@@ -898,10 +914,21 @@ jobs:
           DEVICE_TARGET="${{ steps.device.outputs.target }}"
           PROFILE=$(echo "$DEVICE_TARGET" | sed 's/.*_DEVICE_//' | sed 's/=y$//')
           PACKAGES_LIST=$(tr '\n' ' ' < packages_list.txt)
+          # 必须用绝对路径：下面会 cd ib，相对路径会变成 ib/Devices/...。
+          # 上游 include/rootfs.mk 的 prepare_rootfs 是
+          # `if [ -d '$(2)' ]; then ... fi`（已按 v25.12.2 核实），目录不存在时
+          # 静默跳过、不报错，设备型号改名会无声失效——这类失败最难排查，
+          # 因此这里先显式校验目录存在。
+          FILES_ABS="$GITHUB_WORKSPACE/$DEVICE_DIR/files"
+          if [ ! -d "$FILES_ABS" ]; then
+            echo "::error::未找到 FILES 目录: $FILES_ABS"
+            exit 1
+          fi
           cd ib
           echo "[INFO] PROFILE=$PROFILE"
           echo "[INFO] PACKAGES=$PACKAGES_LIST"
-          make image PROFILE="$PROFILE" PACKAGES="$PACKAGES_LIST" FILES="$DEVICE_DIR/files"
+          echo "[INFO] FILES=$FILES_ABS"
+          make image PROFILE="$PROFILE" PACKAGES="$PACKAGES_LIST" FILES="$FILES_ABS"
           echo "[OK] ImageBuilder 构建完成"
           find bin/targets -type f | head -20
 
