@@ -130,7 +130,7 @@
 
 阶段 IB: ImageBuilder 快速构建（仅 build_mode=imagebuilder）
   [IB.1] 下载 ImageBuilder 与 SDK（与 tag 严格对应）
-  [IB.2] SDK 编译第三方包（OpenClash/argon/argon-config/harbor-file）
+  [IB.2] SDK 编译第三方包（范围由 Packages.sh 决定，未克隆则跳过）
   [IB.3] 组装固件（make image，设备信息用 FILES= 覆盖）
 
 阶段 5: 上传固件（两种模式共用）
@@ -157,8 +157,12 @@
 不编译内核/工具链，而是复用官方预编译产物（与 `tag` 严格对应，保证包 ABI 一致）：
 
 1. **[IB.1]** 下载 `immortalwrt-imagebuilder-<版本>-mediatek-filogic` 与对应 SDK
-2. **[IB.2]** 用 SDK 编译四个第三方包（`OpenClash`、`argon`、`argon-config`、`harbor-file`，均为 `PKGARCH:=all` 的脚本/主题包，不涉及内核 ABI），产出 `.apk` 放入 ImageBuilder 的 `packages/`
+2. **[IB.2]** 用 SDK 编译 `Packages.sh` 实际克隆的第三方包（多为 `PKGARCH:=all` 的脚本/主题包，不涉及内核 ABI），产出 `.apk` 放入 ImageBuilder 的 `packages/`
 3. **[IB.3]** `make image PROFILE=... PACKAGES="..." FILES="..."` 组装固件，`PACKAGES` 列表由 `[3.3]` 从 `Packages.yaml` 生成
+
+> **[IB.2] 的编译范围由 `Packages.sh` 决定，不在工作流里硬编码包名。** 它比对 `Packages.sh` 执行前后 `package/` 下 Makefile 的差集来识别新增的包（只认含 `BuildPackage` 或 `include package.mk`/`luci.mk` 的 Makefile，因此不会误抓仓库附带的纯工具 Makefile），包名优先取 `PKG_NAME:=`、缺失时回退为目录名。
+>
+> 若 `Packages.sh` 未克隆任何包（例如克隆语句被注释），该步骤直接跳过，对应软件包由 `[IB.3]` 从官方源安装——**此时需保证 `Packages.yaml` 里启用的包在官方源中存在**，否则 `make image` 会因找不到包而失败。增删第三方包只需改 `Devices/<设备>/` 下的配置，不必再动工作流。
 
 ### 设备信息（imagebuilder 模式）
 
