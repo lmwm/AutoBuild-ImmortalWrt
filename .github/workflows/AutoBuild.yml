@@ -813,12 +813,44 @@ jobs:
 
           curl -fL -o "$IB_FILE" "$BASE_URL/$IB_FILE"
           curl -fL -o "$SDK_FILE" "$BASE_URL/$SDK_FILE"
+          echo "[INFO] 已下载 ImageBuilder: $IB_FILE"
+          echo "[INFO] 已下载 SDK: $SDK_FILE"
+
           tar --zstd -xf "$IB_FILE"
           tar --zstd -xf "$SDK_FILE"
-          mv immortalwrt-imagebuilder-* ib
-          mv immortalwrt-sdk-* sdk
-          echo "[OK] ImageBuilder: $IB_FILE"
-          echo "[OK] SDK: $SDK_FILE"
+
+          # 不能用 `mv immortalwrt-imagebuilder-* ib`：解压后压缩包仍在原处，
+          # 通配符会同时匹配到「压缩包」和「解压出的目录」两个对象。GNU mv 在
+          # 「多源 + 目标不存在」时会把末位参数当目标目录，于是报
+          # `mv: target 'ib': No such file or directory`（sdk 同理）。
+          # 这里只挑目录，且限定 maxdepth 1，避免递归匹配到子目录。
+          IB_DIRS=$(find . -maxdepth 1 -type d -name 'immortalwrt-imagebuilder-*')
+          SDK_DIRS=$(find . -maxdepth 1 -type d -name 'immortalwrt-sdk-*')
+          IB_DIR=$(printf '%s\n' "$IB_DIRS" | head -1)
+          SDK_DIR=$(printf '%s\n' "$SDK_DIRS" | head -1)
+
+          if [ -z "$IB_DIR" ] || [ -z "$SDK_DIR" ]; then
+            echo "::error::解压后未找到 ImageBuilder 或 SDK 目录"
+            echo "[ERROR] 当前目录内容:"
+            ls -1
+            exit 1
+          fi
+
+          # 正常情况下各自只有一个顶层目录；多于一个说明上游打包结构有变化，
+          # 此时列出全部候选以便排查（仍取第一个，不因此中断构建）。
+          if [ "$(printf '%s\n' "$IB_DIRS" | grep -c .)" -gt 1 ]; then
+            echo "[WARN] 匹配到多个 ImageBuilder 目录，取第一个:"
+            printf '%s\n' "$IB_DIRS" | sed 's|^|  |'
+          fi
+          if [ "$(printf '%s\n' "$SDK_DIRS" | grep -c .)" -gt 1 ]; then
+            echo "[WARN] 匹配到多个 SDK 目录，取第一个:"
+            printf '%s\n' "$SDK_DIRS" | sed 's|^|  |'
+          fi
+
+          mv "$IB_DIR" ib
+          mv "$SDK_DIR" sdk
+          echo "[OK] ImageBuilder 目录: $IB_DIR -> ib"
+          echo "[OK] SDK 目录: $SDK_DIR -> sdk"
           echo "PLATFORM_PATH=$PLATFORM_PATH" >> $GITHUB_ENV
 
       # ----------------------------------------------------------
@@ -887,7 +919,13 @@ jobs:
       # ----------------------------------------------------------
       - name: "[5.1] 整理固件"
         id: organize
-        if: ${{ !inputs.skip_compile && !cancelled() && (inputs.build_mode == 'imagebuilder' || steps.compile.outputs.status == 'success') }}
+        # 注意：条件里含 !cancelled() 与 !inputs.skip_compile，二者都不是状态
+        # 检查函数，但 GitHub 规定「条件的顶层只要出现任一状态检查函数
+        # （success()/failure()/cancelled()/always()），就不再自动附加隐式
+        # success()」。因此上一阶段失败时本步骤不会被自动跳过，必须显式
+        # 写明 success()，否则 [IB.1] 失败后这里仍会执行，再报一个找不到
+        # bin 目录的误导性错误。
+        if: ${{ !inputs.skip_compile && !cancelled() && success() && (inputs.build_mode == 'imagebuilder' || steps.compile.outputs.status == 'success') }}
         run: |
           MODEL="${{ steps.device.outputs.model }}"
           VERSION="${{ steps.version.outputs.tag }}"
