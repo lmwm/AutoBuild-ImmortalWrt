@@ -132,7 +132,9 @@ jobs:
           fi
 
           # 解析 YAML 配置（键名首字母大写；用 sed 而非 awk，避免带空格的值被截断）
+          # 注意：grep '^Model:' 不会误匹配 '^Model_dts:'（要求 Model 后紧跟冒号）
           DEVICE_MODEL=$(grep '^Model:' "$CONF" | sed 's/^Model: *//' | tr -d '"' | tr -d "'")
+          MODEL_DTS=$(grep '^Model_dts:' "$CONF" | sed 's/^Model_dts: *//' | tr -d '"' | tr -d "'")
           PACKAGES_LIST=$(grep '^Packages_list:' "$CONF" | sed 's/^Packages_list: *//' | tr -d '"' | tr -d "'")
           DEVICE_TARGET=$(grep '^Target:' "$CONF" | sed 's/^Target: *//' | tr -d '"' | tr -d "'")
 
@@ -157,6 +159,7 @@ jobs:
 
           echo "device_dir=${DEVICE_DIR}" >> $GITHUB_OUTPUT
           echo "model=${DEVICE_MODEL}" >> $GITHUB_OUTPUT
+          echo "model_dts=${MODEL_DTS}" >> $GITHUB_OUTPUT
           echo "packages_list=${PACKAGES_LIST}" >> $GITHUB_OUTPUT
           echo "target=${DEVICE_TARGET}" >> $GITHUB_OUTPUT
           echo "platform=${PLATFORM_SLUG}" >> $GITHUB_OUTPUT
@@ -167,6 +170,7 @@ jobs:
           echo "  设备: ${DEVICE}"
           echo "  设备目录: ${DEVICE_DIR}"
           echo "  型号: ${DEVICE_MODEL}"
+          echo "  DTS 原始型号: ${MODEL_DTS:-（未设置）}"
           echo "  包列表: ${PACKAGES_LIST}"
           echo "  平台: ${PLATFORM_SLUG}"
           echo "  TARGET: ${DEVICE_TARGET}"
@@ -782,8 +786,9 @@ jobs:
       #   [IB.2] 用 SDK 编译 Packages.sh 实际克隆的第三方包（多为
       #          PKGARCH:=all 的脚本/主题包，无内核 ABI 问题），产出 .apk
       #          放入 ImageBuilder 的 packages/；未克隆任何包时整步跳过
-      #   [IB.3] make image 组装固件；设备信息用 FILES= 目录覆盖（不改
-      #          dtb，只覆盖用户态文件 + uci-defaults 运行时修正显示）
+      #   [IB.3] make image 组装固件；设备型号在 make image 前修改 IB 内
+      #          DTS 源的 model 属性（现场编译 dtb，dtb 层生效）；
+      #          FILES= 目录覆盖用户态文件（可选）
       #
       # 预期总耗时 10-15 分钟。输出目录与全量编译一致
       # （bin/targets/<平台>/），因此 [5.x] 上传可共用。
@@ -944,87 +949,166 @@ jobs:
       # IB.3 组装固件（make image）
       #
       # PACKAGES 列表由 [3.3] 从 Packages.yaml 生成（packages_list.txt）。
-      # FILES= 指向 Devices/<设备>/files，内容在运行时覆盖用户态设备信息。
+      # 设备型号：make image 前修改 IB 内 DTS 源的 model 属性——make image
+      #           会现场编译 dtb，型号在 dtb 层生效，全链路自动正确。
+      # FILES=：可选，指向 Devices/<设备>/files，在运行时覆盖用户态文件。
       # ----------------------------------------------------------
       - name: "[IB.3] 组装固件 (make image)"
         if: ${{ inputs.build_mode == 'imagebuilder' }}
         run: |
           DEVICE_DIR="${{ steps.device.outputs.device_dir }}"
           DEVICE_TARGET="${{ steps.device.outputs.target }}"
+          MODEL="${{ steps.device.outputs.model }}"
+          MODEL_DTS="${{ steps.device.outputs.model_dts }}"
           PROFILE=$(echo "$DEVICE_TARGET" | sed 's/.*_DEVICE_//' | sed 's/=y$//')
           PACKAGES_LIST=$(tr '\n' ' ' < packages_list.txt)
           # FILES 源目录必须用绝对路径：下面会 cd ib，相对路径会变成 ib/Devices/...。
-          # 上游 include/rootfs.mk 的 prepare_rootfs 是
-          # `if [ -d '$(2)' ]; then ... fi`（已按 v25.12.2 核实），目录不存在时
-          # 静默跳过、不报错，设备型号改名会无声失效——这类失败最难排查，
-          # 因此这里先显式校验目录存在。
+          # 设备型号改名不走 FILES（见下方 DTS 型号替换段），FILES 现在是可选项：
+          # Devices/<设备>/files 目录不存在时直接跳过用户态文件覆盖。
           FILES_SRC="$GITHUB_WORKSPACE/$DEVICE_DIR/files"
-          if [ ! -d "$FILES_SRC" ]; then
-            echo "::error::未找到 FILES 目录: $FILES_SRC"
-            exit 1
-          fi
 
-          # ---- FILES 路径不能含空格（否则 make image 必定失败）----
-          # 设备目录名是 "Cudy TR3000"，路径里的空格会被上游拆开。链路已按
-          # ImmortalWrt v25.12.2 核实：
-          #   target/imagebuilder/files/Makefile 的 image 目标
-          #     $(if $(FILES),USER_FILES="$(FILES)")
-          #   -> include/rootfs.mk 的 prepare_rootfs
-          #     $(call file_copy,$(2)/.,$(1))
-          #   -> include/rules.mk 的 file_copy（$(CP) 即 `cp -fpR`）
-          #     $(CP) $(1) $(2)          # 这一行没有加引号
-          # 于是 shell 收到两个源参数 `.../Devices/Cudy` 与 `TR3000/files/.`，
-          # 报两条 `cp: cannot stat` 并让 prepare_rootfs 以 Error 1 退出。
-          # 注意 make 变量层的引号（USER_FILES="$(FILES)"）挡不住这一步：真正的
-          # 拆分发生在 make 展开成 shell 命令之后。
-          # 因此把内容复制到一个不含空格的中转目录再传给 FILES=。不能用
-          # ib/files —— 那是上游 ImageBuilder 自带的目录（含 Makefile 等）。
-          FILES_ABS="${RUNNER_TEMP:-/tmp}/ib-files"
-          case "$FILES_ABS" in
-            *" "*)
-              echo "::error::FILES 中转目录含空格，上游 file_copy 会拆分路径: $FILES_ABS"
-              exit 1
-              ;;
-          esac
-          rm -rf "$FILES_ABS"
-          mkdir -p "$FILES_ABS"
-          cp -a "$FILES_SRC/." "$FILES_ABS/"
+          FILES_ABS=""
+          if [ -d "$FILES_SRC" ]; then
+            # ---- FILES 路径不能含空格（否则 make image 必定失败）----
+            # 设备目录名是 "Cudy TR3000"，路径里的空格会被上游拆开。链路已按
+            # ImmortalWrt v25.12.2 核实：
+            #   target/imagebuilder/files/Makefile 的 image 目标
+            #     $(if $(FILES),USER_FILES="$(FILES)")
+            #   -> include/rootfs.mk 的 prepare_rootfs
+            #     $(call file_copy,$(2)/.,$(1))
+            #   -> include/rules.mk 的 file_copy（$(CP) 即 `cp -fpR`）
+            #     $(CP) $(1) $(2)          # 这一行没有加引号
+            # 于是 shell 收到两个源参数 `.../Devices/Cudy` 与 `TR3000/files/.`，
+            # 报两条 `cp: cannot stat` 并让 prepare_rootfs 以 Error 1 退出。
+            # 注意 make 变量层的引号（USER_FILES="$(FILES)"）挡不住这一步：真正的
+            # 拆分发生在 make 展开成 shell 命令之后。
+            # 因此把内容复制到一个不含空格的中转目录再传给 FILES=。不能用
+            # ib/files —— 那是上游 ImageBuilder 自带的目录（含 Makefile 等）。
+            FILES_ABS="${RUNNER_TEMP:-/tmp}/ib-files"
+            case "$FILES_ABS" in
+              *" "*)
+                echo "::error::FILES 中转目录含空格，上游 file_copy 会拆分路径: $FILES_ABS"
+                exit 1
+                ;;
+            esac
+            rm -rf "$FILES_ABS"
+            mkdir -p "$FILES_ABS"
+            cp -a "$FILES_SRC/." "$FILES_ABS/"
+          else
+            echo "[INFO] 无 FILES 目录（$FILES_SRC），跳过用户态文件覆盖"
+          fi
 
           cd ib
           echo "[INFO] PROFILE=$PROFILE"
           echo "[INFO] PACKAGES=$PACKAGES_LIST"
-          echo "[INFO] FILES 源目录: $FILES_SRC"
-          echo "[INFO] FILES 传入路径（不含空格）: $FILES_ABS"
-          make image PROFILE="$PROFILE" PACKAGES="$PACKAGES_LIST" FILES="$FILES_ABS"
 
-          # ---- 校验 FILES 覆盖确实生效 ----
+          # ---- 修改 DTS 设备型号（dtb 层改名，全链路生效）----
+          # ImageBuilder 虽不编译内核，但 make image 会现场编译 dtb
+          # （已按 ImmortalWrt v25.12.2 核实）：
+          #   1. target/imagebuilder/Makefile 打包 IB 时带上了
+          #      $(LINUX_DIR)/arch/$(LINUX_KARCH)/boot/dts/*（DTS 源与 dtb）
+          #      以及 scripts/dtc/dtc（dtc 编译器）
+          #   2. include/image.mk 的 dtb 规则：
+          #        $(KDIR)/image-$(1).dtb: FORCE
+          #        $(call Image/BuildDTB,$(DTS_DIR)/<dts>.dts,$$@)
+          #      其中 DTS_DIR:=$(LINUX_DIR)/arch/$(LINUX_KARCH)/boot/dts
+          #      即每次 make image 都从 IB 内的 DTS 源重新编译 dtb
+          #   3. target/imagebuilder/files/Makefile 的 build_image 走
+          #        make -C target/linux/$(BOARD)/image install
+          #      是完整的镜像构建链路
+          # 因此在 make image 之前 sed DTS 的 model 字符串，型号即写进 dtb：
+          # /proc/device-tree/model、/tmp/sysinfo/model、/etc/board.json、
+          # ubus system.board 与 LuCI 概览页全部自动正确，无需用户态补丁。
+          if [ -z "$MODEL_DTS" ]; then
+            echo "[INFO] Device.yaml 未定义 Model_dts，跳过型号替换"
+          elif [ "$MODEL_DTS" = "$MODEL" ]; then
+            echo "[INFO] Model_dts 与 Model 相同，跳过型号替换"
+          else
+            echo "[INFO] 型号替换: \"$MODEL_DTS\" -> \"$MODEL\""
+            # target/ 与 build_dir/ 两处都找：前者是 IB 自带的 DTS 源目录，
+            # 后者是内核树 DTS_DIR 的副本（dtb 规则的实际输入）。
+            # grep -F 按字面匹配；找不到即报错，不做静默跳过。
+            MATCHED=$(grep -rl -F --include='*.dts' "$MODEL_DTS" target build_dir 2>/dev/null || true)
+            if [ -z "$MATCHED" ]; then
+              echo "::error::未在 ImageBuilder 中找到含 \"$MODEL_DTS\" 的 DTS 文件，型号替换无法进行"
+              exit 1
+            fi
+            # 转义 sed 替换对中的元字符，避免型号名里的 . * [ ] \ / & 被当正则
+            SED_FROM=$(printf '%s' "$MODEL_DTS" | sed 's/[][\\.*^$\/&]/\\&/g')
+            SED_TO=$(printf '%s' "$MODEL" | sed 's/[&\/]/\\&/g')
+            while IFS= read -r f; do
+              [ -n "$f" ] || continue
+              sed -i "s|$SED_FROM|$SED_TO|g" "$f"
+              echo "[OK] 已修改 DTS: $f"
+            done <<< "$MATCHED"
+            # 删除仍含旧型号的 dtb 二进制：make image 的 FORCE 规则会重新编译，
+            # 这里删除可杜绝旧产物残留混入镜像。
+            while IFS= read -r d; do
+              [ -n "$d" ] || continue
+              if strings "$d" 2>/dev/null | grep -qF "$MODEL_DTS"; then
+                rm -f "$d"
+                echo "[OK] 已删除旧 dtb 产物（make image 将重新编译）: $d"
+              fi
+            done < <(find build_dir -name '*.dtb' -type f 2>/dev/null)
+          fi
+
+          if [ -n "$FILES_ABS" ]; then
+            echo "[INFO] FILES 源目录: $FILES_SRC"
+            echo "[INFO] FILES 传入路径（不含空格）: $FILES_ABS"
+            make image PROFILE="$PROFILE" PACKAGES="$PACKAGES_LIST" FILES="$FILES_ABS"
+          else
+            make image PROFILE="$PROFILE" PACKAGES="$PACKAGES_LIST"
+          fi
+
+          # ---- 校验 dtb 型号替换确实生效 ----
+          # sed 替换若无声失败，固件照样构建成功、概览页型号却是旧的。
+          # 这里检查全部 dtb 产物，把「静默失效」变成「显式失败」。
+          if [ -n "$MODEL_DTS" ] && [ "$MODEL_DTS" != "$MODEL" ]; then
+            bad=0
+            while IFS= read -r d; do
+              [ -n "$d" ] || continue
+              if strings "$d" 2>/dev/null | grep -qF "$MODEL_DTS"; then
+                echo "::error::dtb 仍含旧型号: $d"
+                bad=1
+              fi
+            done < <(find build_dir -name '*.dtb' -type f 2>/dev/null)
+            if [ "$bad" -ne 0 ]; then
+              echo "::error::DTS 型号替换未生效（详见上方 dtb 清单）"
+              exit 1
+            fi
+            echo "[OK] dtb 型号校验通过（已无旧型号字符串）"
+          fi
+
+          # ---- 校验 FILES 覆盖确实生效（仅在使用 FILES 时）----
           # 上游 file_copy 在 FILES 为空或目录不存在时静默跳过，构建照样「成功」，
-          # 只是设备型号改名悄悄失效。这里回到构建出来的 rootfs 里确认文件已落地，
+          # 只是覆盖文件悄悄失效。这里回到构建出来的 rootfs 里确认文件已落地，
           # 把「静默失效」变成「显式失败」。
           # 路径依据（已按 v25.12.2 核实）：rules.mk 中
           #   TARGET_DIR := $(TARGET_ROOTFS_DIR)/root-$(BOARD)
           #   TARGET_ROOTFS_DIR ?= BUILD_DIR（默认），而 BUILD_DIR 位于 $(TOPDIR)/build_dir
           # 因此形如 ib/build_dir/target-<目标>/root-<板级名>，maxdepth 留有余量。
-          ROOTFS_DIR=$(find build_dir -maxdepth 2 -type d -path 'build_dir/target-*/root-*' 2>/dev/null | head -1)
-          if [ -z "$ROOTFS_DIR" ]; then
-            # 上游目录结构若有变化，这里只警告不中断：宁可少一次校验，
-            # 也不要让纯校验步骤把已经成功的构建判成失败。
-            echo "[WARN] 未在 build_dir 下找到 rootfs 目录，跳过 FILES 生效校验"
-          else
-            echo "[INFO] 校验 FILES 生效情况（rootfs: $ROOTFS_DIR）"
-            missing=0
-            while IFS= read -r rel; do
-              [ -n "$rel" ] || continue
-              if [ -e "$ROOTFS_DIR/$rel" ]; then
-                echo "[OK] FILES 已生效: /$rel"
-              else
-                echo "::error::FILES 未生效，rootfs 中缺少: /$rel"
-                missing=1
+          if [ -n "$FILES_ABS" ]; then
+            ROOTFS_DIR=$(find build_dir -maxdepth 2 -type d -path 'build_dir/target-*/root-*' 2>/dev/null | head -1)
+            if [ -z "$ROOTFS_DIR" ]; then
+              # 上游目录结构若有变化，这里只警告不中断：宁可少一次校验，
+              # 也不要让纯校验步骤把已经成功的构建判成失败。
+              echo "[WARN] 未在 build_dir 下找到 rootfs 目录，跳过 FILES 生效校验"
+            else
+              echo "[INFO] 校验 FILES 生效情况（rootfs: $ROOTFS_DIR）"
+              missing=0
+              while IFS= read -r rel; do
+                [ -n "$rel" ] || continue
+                if [ -e "$ROOTFS_DIR/$rel" ]; then
+                  echo "[OK] FILES 已生效: /$rel"
+                else
+                  echo "::error::FILES 未生效，rootfs 中缺少: /$rel"
+                  missing=1
+                fi
+              done <<< "$(cd "$FILES_ABS" && find . -type f | sed 's|^\./||')"
+              if [ "$missing" -ne 0 ]; then
+                echo "::error::FILES 覆盖未生效（上游目录不存在时会静默跳过）"
+                exit 1
               fi
-            done <<< "$(cd "$FILES_ABS" && find . -type f | sed 's|^\./||')"
-            if [ "$missing" -ne 0 ]; then
-              echo "::error::FILES 覆盖未生效（上游目录不存在时会静默跳过）"
-              exit 1
             fi
           fi
 

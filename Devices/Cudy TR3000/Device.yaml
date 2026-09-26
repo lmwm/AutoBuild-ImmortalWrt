@@ -5,6 +5,13 @@
 # 设备型号（用于固件命名与 Artifact 命名）
 Model: "Cudy TR3000"
 
+# DTS 中的原始型号名（dtb model 属性）
+# imagebuilder 模式：[IB.3] 在 make image 前把 IB 内 DTS 里的此字符串替换为
+# Model（make image 会现场编译 dtb，型号改名在 dtb 层生效，全链路自动正确）
+# full 模式：由 Customize.sh 处理，与此字段无关
+# 可选；缺失或与 Model 相同则跳过型号替换
+Model_dts: "Cudy TR3000 v1 (OpenWrt U-Boot layout)"
+
 # 自定义软件包列表文件
 Packages_list: "Packages.yaml"
 

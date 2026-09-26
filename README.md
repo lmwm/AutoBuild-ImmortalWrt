@@ -150,7 +150,7 @@
 | 方式 | 耗时 | 适用场景 | 局限 |
 |------|------|----------|------|
 | `full`（默认） | 约 3 小时（增量缓存命中后 15–30 分钟） | 改内核、改 DTS、改设备定制 | 首次全量编译慢 |
-| `imagebuilder` | **约 10–15 分钟** | 只调整软件包列表（加/删包） | 不能改内核/DTS，设备信息用 `FILES=` 覆盖 |
+| `imagebuilder` | **约 10–15 分钟** | 调整软件包列表、改设备型号 | 不能改内核配置/补丁，不能自编 kmod（ABI 须配官方内核） |
 
 ### imagebuilder 模式的工作方式
 
@@ -158,26 +158,41 @@
 
 1. **[IB.1]** 下载 `immortalwrt-imagebuilder-<版本>-mediatek-filogic` 与对应 SDK
 2. **[IB.2]** 用 SDK 编译 `Packages.sh` 实际克隆的第三方包（多为 `PKGARCH:=all` 的脚本/主题包，不涉及内核 ABI），产出 `.apk` 放入 ImageBuilder 的 `packages/`
-3. **[IB.3]** `make image PROFILE=... PACKAGES="..." FILES="..."` 组装固件，`PACKAGES` 列表由 `[3.3]` 从 `Packages.yaml` 生成
+3. **[IB.3]** `make image PROFILE=... PACKAGES="..." [FILES="..."]` 组装固件，`PACKAGES` 列表由 `[3.3]` 从 `Packages.yaml` 生成；`make image` **之前**修改 IB 内 DTS 源的 `model` 属性（现场编译 dtb，型号改名在 dtb 层生效，见下文「设备型号」），`FILES=` 为可选的用户态文件覆盖
 
-> **FILES 路径不能含空格。** 设备目录名（如 `Cudy TR3000`）含空格，而上游 `include/rules.mk` 的 `file_copy` 里是未加引号的 `$(CP) $(1) $(2)`（`CP:=cp -fpR`），路径会被 shell 拆成两个参数，报两条 `cp: cannot stat` 并让 `prepare_rootfs` 失败（2026-09-25 实测）。因此 `[IB.3]` 先把 `Devices/<设备>/files` 复制到不含空格的中转目录 `$RUNNER_TEMP/ib-files`，再把该路径传给 `FILES=`。`make image` 完成后还会回到 rootfs 逐个核对文件是否落地——上游 `if [ -d '$(2)' ]` 在目录缺失时静默跳过，这一步把「型号改名悄悄失效」变成显式失败。
+> **`FILES=` 是可选项**：`Devices/<设备>/files` 目录不存在时 `[IB.3]` 直接跳过用户态文件覆盖，不报错。使用时**路径不能含空格。** 设备目录名（如 `Cudy TR3000`）含空格，而上游 `include/rules.mk` 的 `file_copy` 里是未加引号的 `$(CP) $(1) $(2)`（`CP:=cp -fpR`），路径会被 shell 拆成两个参数，报两条 `cp: cannot stat` 并让 `prepare_rootfs` 失败（2026-09-25 实测）。因此 `[IB.3]` 先把 `Devices/<设备>/files` 复制到不含空格的中转目录 `$RUNNER_TEMP/ib-files`，再把该路径传给 `FILES=`。`make image` 完成后还会回到 rootfs 逐个核对文件是否落地——上游 `if [ -d '$(2)' ]` 在目录缺失时静默跳过，这一步把「覆盖悄悄失效」变成显式失败。
 
 > **[IB.2] 的编译范围由 `Packages.sh` 决定，不在工作流里硬编码包名。** 它比对 `Packages.sh` 执行前后 `package/` 下 Makefile 的差集来识别新增的包（只认含 `BuildPackage` 或 `include package.mk`/`luci.mk` 的 Makefile，因此不会误抓仓库附带的纯工具 Makefile），包名优先取 `PKG_NAME:=`、缺失时回退为目录名。
 >
 > 若 `Packages.sh` 未克隆任何包（例如克隆语句被注释），该步骤直接跳过，对应软件包由 `[IB.3]` 从官方源安装——**此时需保证 `Packages.yaml` 里启用的包在官方源中存在**，否则 `make image` 会因找不到包而失败。增删第三方包只需改 `Devices/<设备>/` 下的配置，不必再动工作流。
 
-### 设备信息（imagebuilder 模式）
+### 设备型号（两种模式）
 
-`full` 模式通过 `Customize.sh` 修改 dtb 的 model 属性；`imagebuilder` 不编译内核，改为用 `FILES=` 覆盖用户态文件：
+型号显示的真实链路（已按 ImmortalWrt v25.12.2 核实）：
 
 ```
-Devices/<设备名>/files/
-└── etc/uci-defaults/99-custom-model   # 首次启动时修正设备型号显示
+dtb 的 model 属性
+  → /proc/device-tree/model
+    → /tmp/sysinfo/model        （preinit 02_sysinfo 写入）
+      → ubus system.board.model （procd 优先读 /tmp/sysinfo/model）
+        → LuCI 概览页「型号」
 ```
 
-该脚本修正 `/etc/board.json`、`/etc/openwrt_release`、`/etc/banner` 里的型号名；`/proc/device-tree/model`（dtb 层）保持原样，那是硬件描述，与运行时显示无关。
+**改 dtb 的 model 才是全链路生效的做法。** 用户态补丁（改 `/etc/board.json`、
+`/etc/openwrt_release`、`/etc/banner`）不在这条链路上，改了也不会反映到概览页；
+且 `/tmp/sysinfo/model` 位于 tmpfs、每次启动由 `02_sysinfo` 重新生成，用户态
+一次性补丁无法持久生效。
 
-工作流在 `make image` 前会把该目录复制到不含空格的中转路径（原因见上文 `[IB.3]` 的说明），因此设备目录名保留空格不影响构建。
+两种模式都改 dtb，只是位置不同：
+
+| 模式 | 做法 |
+|------|------|
+| `full` | `Customize.sh` 修改源码树 `target/linux/mediatek/dts/<设备>.dts` 的 `model`，编译时生成 dtb |
+| `imagebuilder` | `[IB.3]` 在 `make image` 前修改 IB 内 DTS 源的 `model`。ImageBuilder 不编内核，但 `make image` 会现场编译 dtb（IB 自带 DTS 源与 dtc，dtb 规则为 `FORCE` 每次重编），型号改名在 dtb 层生效 |
+
+型号字符串由 `Device.yaml` 的 `Model_dts`（DTS 原始值）与 `Model`（目标值）提供，
+`imagebuilder` 模式下替换带校验：找不到 DTS 文件、或构建后 dtb 仍含旧型号，
+都会让构建显式失败，不会静默出一个没改名的固件。
 
 ### 注意事项
 
@@ -206,6 +221,11 @@ OpenClash 只用 ruby 跑订阅规则转换等一次性短脚本，JIT 加速没
 # 设备型号（用于固件命名与 Artifact 命名）
 Model: "Cudy TR3000"
 
+# DTS 中的原始型号名（dtb model 属性）
+# imagebuilder 模式在 make image 前把它替换为 Model；full 模式由 Customize.sh 处理
+# 可选；缺失或与 Model 相同则跳过型号替换
+Model_dts: "Cudy TR3000 v1 (OpenWrt U-Boot layout)"
+
 # 自定义软件包列表文件
 Packages_list: "Packages.yaml"
 
@@ -220,7 +240,10 @@ Target: "CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-v1-ubootmod=y"
 ```yaml
 # 启用的包
 enable:
+  # LuCI 中文支持（翻译按包分发，各 luci-app 的中文是独立的 luci-i18n-<名>-zh-cn）
   - luci-i18n-base-zh-cn
+  - luci-i18n-mwan3-zh-cn
+  - luci-i18n-ttyd-zh-cn
   - luci-theme-argon
   - luci-app-mwan3
   - luci-app-ttyd
@@ -244,6 +267,14 @@ disable_components:
 ```
 
 > `usbutils` 提供 `lsusb` 命令，用于查看 USB 设备信息（调试 USB 网卡/RNDIS 时常用）。
+
+> **中文翻译的分包规则**：LuCI 翻译按包分发，`luci-i18n-base-zh-cn` 只覆盖
+> `luci-base` 的界面文案（核心模块 `luci-mod-status`/`system`/`network` 的字符串
+> 也收录在 `base.po`，没有独立语言包）；各 `luci-app-*` 与 `luci-mod-dashboard`
+> 的翻译是独立的 `luci-i18n-<名>-zh-cn` 包，不安装对应页面就是英文。`zh-cn` 是
+> `zh_Hans` 的别名（`luci.mk` 的 `LUCI_LC_ALIAS`）。启用新 `luci-app` 时记得同步
+> 补它的 `luci-i18n-<名>-zh-cn`；这些包必须在官方源中存在，否则 `make image`
+> 会因找不到包而失败。
 
 ### Packages.sh
 
@@ -328,6 +359,8 @@ mkdir -p "Devices/NanoPi R4S"
 
 ```yaml
 Model: "NanoPi R4S"
+# 可选：DTS 中的原始型号名（imagebuilder 模式替换为 Model 用，无需改型号就不写）
+# Model_dts: "..."
 Packages_list: "Packages.yaml"
 Target: "CONFIG_TARGET_rockchip_armv8_DEVICE_friendlyarm_nanopi-r4s=y"
 ```
@@ -337,6 +370,7 @@ Target: "CONFIG_TARGET_rockchip_armv8_DEVICE_friendlyarm_nanopi-r4s=y"
 ```yaml
 enable:
   - luci-i18n-base-zh-cn
+  - luci-i18n-mwan3-zh-cn
   - luci-app-mwan3
   - luci-app-ttyd
 

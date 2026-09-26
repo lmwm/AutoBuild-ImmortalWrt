@@ -5,7 +5,21 @@
 # 启用的包
 enable:
   # LuCI 中文支持
+  # LuCI 翻译按包分发：luci-i18n-base-zh-cn 覆盖 luci-base 的界面文案
+  # （核心模块 luci-mod-status / system / network 的字符串也收录在 base.po，
+  #   概览页"型号/主机名/固件版本"等即来自它，无独立语言包）；
+  # 各 luci-app 与 luci-mod-dashboard 的翻译是独立的 luci-i18n-<名>-zh-cn
+  # 包，不单独安装，对应页面就是英文。zh-cn 是 zh_Hans 的别名
+  # （luci.mk 的 LUCI_LC_ALIAS），指向同一个包。
+  # 注意：启用新的 luci-app 时记得同步补它的 luci-i18n-<名>-zh-cn。
   - luci-i18n-base-zh-cn
+  - luci-i18n-dashboard-zh-cn
+  - luci-i18n-mwan3-zh-cn
+  - luci-i18n-ttyd-zh-cn
+  - luci-i18n-wol-zh-cn
+  - luci-i18n-autoreboot-zh-cn
+  - luci-i18n-openclash-zh-cn
+  - luci-i18n-argon-config-zh-cn
 
   # LuCI 主题
   - luci-theme-argon
