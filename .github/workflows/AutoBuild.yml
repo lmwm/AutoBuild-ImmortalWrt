@@ -34,7 +34,7 @@ on:
         default: latest
         required: true
       cache_enabled:
-        description: "启用编译缓存"
+        description: "启用编译缓存（ccache + 源码下载 dl；不含构建树）"
         type: boolean
         default: true
       skip_compile:
@@ -308,37 +308,13 @@ jobs:
         working-directory: immortalwrt
         run: ./scripts/feeds install -a
 
-      # ----------------------------------------------------------
-      # 2.7 重置源码时间戳（增量构建的前提）
-      #
-      # 背景：OpenWrt 的 make 依据「构建状态戳（stamp）与依赖文件的相对时间」
-      #       决定是否跳过编译。每次 git clone 出来的源码时间戳都是"现在"，
-      #       而缓存恢复出来的 stamp 时间戳必然比它旧，于是 make 认为全部
-      #       需要重编——这正是只缓存 staging_dir 时 tools/toolchain 仍要
-      #       重编 25 分钟、总耗时几乎不变的原因。
-      #
-      # 做法：在 clone/feeds 之后、Packages.sh/Customize.sh 之前，把源码树的
-      #       时间戳统一改到过去（2020-01-01）。此后：
-      #       - 已缓存的包：stamp 比源码新 -> make 跳过（增量）
-      #       - Packages.sh / Customize.sh 改过的文件：时间戳是"现在" ->
-      #         精准触发对应包（如 oaf、内核/DTS）重建
-      #       - Packages.sh 中 git clone 的外部包：时间戳是"现在" -> 正常重建
-      #         （数量少、体积小，代价可忽略）
-      #
-      # 注意：只碰源码树本身，排除 build_dir / staging_dir / dl / .ccache——
-      #       它们的时间戳必须保持原样（缓存恢复出的新时间戳正是所需）。
-      # ----------------------------------------------------------
-      - name: "[2.7] 重置源码时间戳（增量构建）"
-        if: ${{ inputs.build_mode == 'full' && inputs.cache_enabled }}
-        run: |
-          cd immortalwrt
-          find . \
-            -path ./build_dir -prune -o \
-            -path ./staging_dir -prune -o \
-            -path ./dl -prune -o \
-            -path ./.ccache -prune -o \
-            -type f -print0 | xargs -0 -r touch -d '2020-01-01 00:00:00'
-          echo "[OK] 源码树时间戳已重置为 2020-01-01（已排除 build_dir/staging_dir/dl/.ccache）"
+      # 说明：此前这里还有一步 [2.7]「重置源码时间戳（增量构建）」，
+      # 把源码树时间戳统一改到 2020-01-01，让缓存恢复出来的 stamp 显得比
+      # 源码新，从而让 make 跳过已编译的包。它只为「构建树缓存」服务：
+      # 该缓存单独一份就达 10.24GB，已超出 GitHub 每仓库 10GB 配额，
+      # 会连带淘汰 ccache 与 dl，且其裁剪步骤曾误删内核源码里的 core.h
+      # 导致下一次编译失败。因此构建树缓存已整体移除，该步骤一并删除。
+      # full 模式现在每次都从零编译，加速改由 ccache 承担（见 [3.4]）。
 
       # ===========================================================
       # 阶段 3: 自定义固件
@@ -514,11 +490,16 @@ jobs:
           echo "=========================================="
 
       # ----------------------------------------------------------
-      # 3.4 恢复编译缓存（可选）
+      # 编译缓存总览（可选）
       #
       # ccache  : 缓存 C/C++ 编译产物，重复编译同一版本可大幅提速
       # dl      : 缓存源码包，避免每次重新下载，降低上游下载失败风险
       # 两者相互独立，分别用 cache_enabled 开关控制。
+      #
+      # 已移除「构建树缓存」（build_dir + staging_dir）：单独一份就达
+      # 10.24GB，超出 GitHub 每仓库 10GB 配额，会连带把 ccache 与 dl 一起
+      # 挤掉；它的裁剪步骤还会误删内核源码里的 core.h，让下一次编译必然
+      # 失败。移除后 full 模式不再做增量构建，加速完全由 ccache 承担。
       #
       # 缓存隔离说明（避免缓存串味影响编译正确性）：
       #   - 两个缓存都带「平台」维度（如 mediatek-filogic）。不同平台/架构的编译
@@ -535,34 +516,6 @@ jobs:
       #   - 注意：GitHub 单个缓存上限 10GB。dl 目录通常在数 GB 级，若日志提示
       #     缓存超限，编译不受影响，只是本次不保存 dl 缓存。
       # ----------------------------------------------------------
-
-      # ----------------------------------------------------------
-      # 3.3.1 恢复构建树缓存（build_dir + staging_dir）
-      #
-      # 两者必须一起缓存：
-      #   staging_dir —— host 工具与交叉工具链的安装产物（tools/toolchain 的输出）
-      #   build_dir   —— 各包的构建产物与「构建状态戳（stamp）」
-      # 只缓存 staging_dir 是无效的：stamp 在 build_dir 里，make 看不到 stamp
-      # 就会把 tools/toolchain 重新编译一遍（实测 25 分钟白费）。
-      #
-      # 增量构建的完整链路：[2.7] 把源码时间戳改旧 -> stamp 显得比源码新 ->
-      # make 跳过已编译的包 -> 只重建 Packages.sh/Customize.sh 改动的包。
-      #
-      # 主键带 github.run_id：actions/cache 在主键完全命中时不会再保存，
-      # 若沿用固定主键，新增的构建结果永远存不进去。带 run_id 后每次都以
-      # 新主键保存，restore-keys 前缀匹配保证仍能复用上一次的缓存，
-      # 旧条目由 GitHub 的 10GB 配额 LRU 自动淘汰。
-      # ----------------------------------------------------------
-      - name: "[3.3.1] 恢复构建树缓存 (build_dir + staging_dir)"
-        if: ${{ inputs.build_mode == 'full' && inputs.cache_enabled }}
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            immortalwrt/build_dir
-            immortalwrt/staging_dir
-          key: tree-${{ runner.os }}-${{ steps.device.outputs.platform }}-${{ steps.version.outputs.tag }}-v1-${{ github.run_id }}
-          restore-keys: |
-            tree-${{ runner.os }}-${{ steps.device.outputs.platform }}-${{ steps.version.outputs.tag }}-v1-
 
       # ----------------------------------------------------------
       # 3.4 恢复 ccache 缓存
@@ -766,7 +719,7 @@ jobs:
           echo "=========================================="
           echo ""
           echo "=========================================="
-          echo "  构建目录体积（评估缓存策略用）"
+          echo "  构建目录体积（评估磁盘占用与缓存策略用）"
           echo "=========================================="
           for d in immortalwrt/staging_dir immortalwrt/build_dir immortalwrt/dl immortalwrt/.ccache; do
             if [ -d "$d" ]; then
@@ -1493,42 +1446,10 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-      # ----------------------------------------------------------
-      # 5.6 裁剪构建树（缓存体积控制）
-      #
-      # build_dir 编译完成后约 43GB / 128 万文件，远超 GitHub 每仓库 10GB 的
-      # 缓存配额，必须裁剪后再保存。裁剪是安全的：
-      #   - 删除 *.o 等中间目标文件后，make 仍会因 stamp 存在而跳过编译
-      #   - 万一某包需要重编，ccache 命中率 99.99%，可秒回这些 .o
-      #   - 打包所需的 ipkg-* 产物目录与 stamp 一律保留
-      #
-      # 刻意不删 *.tmp / .tmp：这两类名字无法区分「可丢弃的临时产物」与
-      # 「构建过程需要的中间文件」，误删的代价（重编甚至构建失败）远高于
-      # 它们占用的体积。裁剪主要靠 *.o（体积大头），这类小文件留着更稳。
-      # ----------------------------------------------------------
-      - name: "[5.6] 裁剪构建树（缓存体积控制）"
-        if: ${{ inputs.build_mode == 'full' && inputs.cache_enabled && !cancelled() }}
-        run: |
-          echo "[裁剪] 之前: build_dir $(du -sh immortalwrt/build_dir 2>/dev/null | cut -f1)"
-          # 只删确定可再生的大件：目标文件与依赖缓存
-          #（stamp 保证不会重编；真需要重编时 ccache 秒回）
-          find immortalwrt/build_dir -type f \( -name '*.o' -o -name '*.lo' -o -name '*.obj' -o -name 'core.*' \) -delete 2>/dev/null || true
-          find immortalwrt/build_dir -type d -name '.deps' -exec rm -rf {} + 2>/dev/null || true
-          echo "[裁剪] 之后: build_dir $(du -sh immortalwrt/build_dir 2>/dev/null | cut -f1)"
-          echo "[裁剪] 之后: staging_dir $(du -sh immortalwrt/staging_dir 2>/dev/null | cut -f1)"
-
-      # ----------------------------------------------------------
-      # 5.7 保存构建树缓存
-      #
-      # key 与 [3.3.1] 保持一致（含 github.run_id），因此每次运行都会以
-      # 新主键保存；restore-keys 前缀匹配保证下次仍能复用本次结果。
-      # 若体积超过 GitHub 缓存上限，此处会提示超限但不影响编译产物。
-      # ----------------------------------------------------------
-      - name: "[5.7] 保存构建树缓存"
-        if: ${{ inputs.build_mode == 'full' && inputs.cache_enabled && !cancelled() }}
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            immortalwrt/build_dir
-            immortalwrt/staging_dir
-          key: tree-${{ runner.os }}-${{ steps.device.outputs.platform }}-${{ steps.version.outputs.tag }}-v1-${{ github.run_id }}
+      # 说明：此前这里还有 [5.6] 裁剪构建树 与 [5.7] 保存构建树缓存两步。
+      # 构建树缓存（build_dir + staging_dir，裁剪后仍有 10.24GB）已整体移除：
+      #   - 体积超过 GitHub 每仓库 10GB 配额，会把 ccache 与 dl 一起挤掉
+      #   - 保存一次要 6.5 分钟；而它的裁剪步骤用 `-name 'core.*'` 误删了
+      #     内核源码中的 core.h（include/net/netns/core.h），使下一次
+      #     full 编译恢复缓存后必然报 "net/netns/core.h: No such file"。
+      # full 模式现在每次从零编译，不再依赖构建树缓存；加速由 ccache 承担。

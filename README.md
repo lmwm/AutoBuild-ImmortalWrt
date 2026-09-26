@@ -28,7 +28,7 @@
 1. Fork 本仓库（首次使用建议先手动跑一次 **同步版本标签**，把版本列表补全）
 2. 进入 **Actions** -> **编译 ImmortalWrt 固件**
 3. 从下拉列表选择设备与版本 -> 点击 **Run workflow**
-4. 等待编译完成（首次约 2-4 小时，命中缓存后显著缩短）
+4. 等待编译完成（`full` 模式约 2-3 小时；`imagebuilder` 模式约 10-15 分钟）
 5. 在 Actions 页面 **Artifacts** 下载固件
 
 ## 工作流参数
@@ -37,7 +37,7 @@
 |------|------|--------|
 | `device` | 目标设备（下拉选择，值与 `Devices/<名>` 目录名一致） | `Cudy TR3000` |
 | `tag` | ImmortalWrt 版本标签（下拉选择） | `latest` |
-| `cache_enabled` | 启用编译缓存（构建树 + ccache + 源码下载 dl） | `true` |
+| `cache_enabled` | 启用编译缓存（ccache + 源码下载 dl） | `true` |
 | `skip_compile` | 跳过编译（调试模式） | `false` |
 | `build_mode` | 构建方式：`full`=全量编译（可改内核/DTS）；`imagebuilder`=官方 ImageBuilder 快速组装 | `full` |
 | `ruby_yjit` | 启用 ruby YJIT（仅 `full` 模式有效；关闭可甩掉整个 Rust/LLVM 工具链，省 60–130 分钟） | `true` |
@@ -63,21 +63,18 @@
 
 ### 编译缓存（可选）
 
-`cache_enabled` 控制三类相互独立的缓存，默认开启：
+`cache_enabled` 控制两类相互独立的缓存，默认开启：
 
 | 缓存 | 路径 | 作用 |
 |------|------|------|
-| 构建树 | `immortalwrt/build_dir` + `immortalwrt/staging_dir` | **增量构建的核心**：各包的构建产物与状态戳、host 工具与交叉工具链；配合 `[2.7]` 的时间戳重置，make 会跳过已编译的包，同版本重复编译降到分钟级 |
-| ccache | `immortalwrt/.ccache` | 缓存 C/C++ 编译产物，用于兜底重建（命中率约 99.99%） |
+| ccache | `immortalwrt/.ccache` | 缓存 C/C++ 编译产物，重复编译同一版本可大幅提速 |
 | dl | `immortalwrt/dl` | 缓存源码包，避免重复下载，降低上游下载失败风险 |
 
-- **增量构建原理**：OpenWrt 的 make 依据「构建状态戳（stamp）与依赖文件的相对时间」跳过已编译的包。`[2.7]` 把 clone/feeds 出来的源码时间戳统一改到过去，stamp 就显得比源码新；而 `Packages.sh`/`Customize.sh` 之后修改的文件时间戳是「现在」，会精准触发对应包（如 oaf、内核/DTS）重建
-- **实测基线**（v25.12.2）：全量约 2 小时 51 分，其中 `feeds/packages/lang/ruby`（OpenClash 依赖）独占约 106 分钟——这类不走 ccache 的巨包正是增量缓存要跳过的目标
-- 构建树缓存的主键带 `github.run_id`（`actions/cache` 主键完全命中时不再保存，固定主键会让新结果永远存不进去），`restore-keys` 前缀匹配保证复用上一次结果，`[5.7]` 每次运行都保存
-- `build_dir` 未裁剪约 43GB / 128 万文件，远超 GitHub 每仓库 10GB 配额，所以 `[5.6]` 在保存前删除 `*.o` 等中间产物（stamp 保证不会重编；万一需要重编，ccache 可秒回）
-- ccache 按 `系统-平台-版本-compiler_check 版本`（当前末尾为 `-cc2`）分键，同平台同版本精确命中；跨版本保留 `restore-keys`，因为 ccache 用源码与命令行哈希校验，版本不符只会失效、不会用错
+- **已不再缓存构建树**（`build_dir` + `staging_dir`）。此前那份缓存单独就有 **10.24GB**，超出 GitHub 每仓库 10GB 的配额，会把 ccache 与 dl 一起挤掉；保存一次要 6.5 分钟；而且其配套的 `[5.6]` 裁剪用 `-name 'core.*'` 误删了内核源码里的 `core.h`（`include/net/netns/core.h`），使下一次 `full` 编译恢复该缓存后**必然报错失败**。因此构建树缓存连同配套的 `[2.7]` 时间戳重置、`[5.6]` 裁剪、`[5.7]` 保存一并移除
+- **`full` 模式现在是纯全量编译**：每次从零编译，不再有「增量命中后 15-30 分钟」这一档。加速完全由 ccache 承担——它按 `系统-平台-版本-compiler_check 版本`（当前末尾为 `-cc2`）分键，同平台同版本精确命中；跨版本保留 `restore-keys`，因为 ccache 用源码与命令行哈希校验，版本不符只会失效、不会用错
+- **实测基线**（v25.12.2）：首次全量约 2 小时 51 分，其中 `feeds/packages/lang/ruby`（OpenClash 依赖）独占约 106 分钟——**这类不走 ccache 的巨包无法被 ccache 加速**，是 `full` 模式的主要耗时来源。想缩短 `full` 耗时请用 `ruby_yjit=false`（见下文），需要分钟级出固件请改用 `imagebuilder`
 - dl 按 `系统-平台-版本` 分键且**不跨版本复用**：dl 里是未校验的压缩包，跨版本混用可能导致某个包源码与目标版本不匹配而报校验失败。代价是每个版本各存一份
-- 三个缓存都带平台维度，将来新增不同平台的设备时不会互相污染
+- 两个缓存都带平台维度，将来新增不同平台的设备时不会互相污染
 - GitHub 单个缓存上限 10GB（所有缓存条目共享，超出按 LRU 淘汰）；若提示超限，编译不受影响，仅本次不保存对应缓存。`[4.3]` 会打印各构建目录的精确体积
 - 启用缓存时会在 `.config` 写入 `CONFIG_DEVEL=y` + `CONFIG_CCACHE=y`（`CONFIG_CCACHE` 的可见性依赖 `CONFIG_DEVEL`），缓存目录沿用 OpenWrt 默认的 `$(TOPDIR)/.ccache`
 - **ccache 的编译器校验方式必须显式指定**：ccache 默认以「编译器二进制的 mtime + size」校验，而本工作流每次运行都会重新编译交叉工具链，mtime 必然变化，恢复回来的缓存对 target 侧会全部失效——表现为缓存显示已命中、编译时间却几乎不变。因此 `[3.5.1]` 会在缓存恢复之后写入 `immortalwrt/.ccache/ccache.conf`：
@@ -109,13 +106,11 @@
   [2.4] 克隆 ImmortalWrt 源码
   [2.5] 更新 feeds
   [2.6] 安装 feeds
-  [2.7] 重置源码时间戳（增量构建）
 
 阶段 3: 自定义固件
   [3.1] 添加自定义软件包（Packages.sh）
   [3.2] 设备定制（Customize.sh）
   [3.3] 生成编译配置（Packages.yaml）
-  [3.3.1] 恢复构建树缓存 build_dir + staging_dir（可选）
   [3.4] 恢复 ccache 缓存（可选）
   [3.5] 恢复源码下载缓存（可选）
   [3.5.1] 配置 ccache 校验方式（可选）
@@ -139,8 +134,6 @@
   [5.3] 上传 recovery/factory 固件
   [5.4] 上传配置文件
   [5.5] 上传完整编译产物（整个 bin 目录）
-  [5.6] 裁剪构建树（缓存体积控制）
-  [5.7] 保存构建树缓存
 ```
 
 ## 构建方式：full 与 imagebuilder
@@ -149,7 +142,7 @@
 
 | 方式 | 耗时 | 适用场景 | 局限 |
 |------|------|----------|------|
-| `full`（默认） | 约 3 小时（增量缓存命中后 15–30 分钟） | 改内核、改 DTS、改设备定制 | 首次全量编译慢 |
+| `full`（默认） | 约 2–3 小时（纯全量，ccache 只能部分加速） | 改内核、改 DTS、改设备定制 | 耗时长；不走 ccache 的巨包（如 ruby）无法加速 |
 | `imagebuilder` | **约 10–15 分钟** | 调整软件包列表、改设备型号 | 不能改内核配置/补丁，不能自编 kmod（ABI 须配官方内核） |
 
 ### imagebuilder 模式的工作方式
@@ -196,7 +189,7 @@ dtb 的 model 属性
 
 ### 注意事项
 
-- `imagebuilder` 模式下 `cache_enabled` 不生效（无需编译缓存），增量缓存等步骤自动跳过
+- `imagebuilder` 模式下 `cache_enabled` 不生效（无需编译缓存），恢复 ccache/dl 等步骤自动跳过
 - 若目标 tag 尚未发布官方 ImageBuilder，`[IB.1]` 会报错退出，此时改用 `full` 模式
 - 内核模块类第三方包（`kmod-xxx`）需与官方内核 ABI 严格匹配；当前配置已移除 `kmod-oaf`，若将来加回请自行评估
 - **`[IB.1]` 要求归档唯一命中**：同一目录若出现多个 ImageBuilder 或 SDK 归档（多宿主架构、多 gcc 版本等），会列出候选并报错退出，不会静默取第一个；下载后还会做一次归档完整性校验，避免下载被截断后在解压阶段才暴露
