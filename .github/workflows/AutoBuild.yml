@@ -784,8 +784,9 @@ jobs:
       # SDK（与 tag 严格对应，保证包 ABI 一致）：
       #   [IB.1] 下载并解压 ImageBuilder 与 SDK
       #   [IB.2] 用 SDK 编译 Packages.sh 实际克隆的第三方包（多为
-      #          PKGARCH:=all 的脚本/主题包，无内核 ABI 问题），产出 .apk
-      #          放入 ImageBuilder 的 packages/；未克隆任何包时整步跳过
+      #          PKGARCH:=all 的脚本/主题包，无内核 ABI 问题），产出安装包
+      #          （.apk 或 .ipk，按版本而定）放入 ImageBuilder 的 packages/；
+      #          未克隆任何包时整步跳过
       #   [IB.3] make image 组装固件；设备型号在 make image 前修改 IB 内
       #          DTS 源的 model 属性（现场编译 dtb，dtb 层生效）；
       #          FILES= 目录覆盖用户态文件（可选）
@@ -808,17 +809,52 @@ jobs:
           BASE_URL="https://downloads.immortalwrt.org/releases/${VER_RAW}/targets/${PLATFORM_PATH}"
           echo "[INFO] 下载源: $BASE_URL"
 
-          IB_FILE=$(curl -fsSL "$BASE_URL/" | grep -oE 'immortalwrt-imagebuilder-[^"]+\.tar\.zst' | head -1)
-          SDK_FILE=$(curl -fsSL "$BASE_URL/" | grep -oE 'immortalwrt-sdk-[^"]+\.tar\.zst' | head -1)
-          if [ -z "$IB_FILE" ] || [ -z "$SDK_FILE" ]; then
+          # ---- 选定 ImageBuilder / SDK 归档 ----
+          # 不能 `... | head -1` 静默取第一个：上游同一目录若出现多个候选
+          # （多宿主架构、多 gcc 版本、或上游改了命名），取第一个可能拿到
+          # 不匹配的归档，而错误要到很后面才以别的形式暴露。
+          # 这里要求唯一命中：0 个 -> 明确报错；>=2 个 -> 列出候选并要求
+          # 人工确认，不猜。
+          IB_CANDS=$(curl -fsSL "$BASE_URL/" | grep -oE 'immortalwrt-imagebuilder-[^"]+\.tar\.zst' | sort -u)
+          SDK_CANDS=$(curl -fsSL "$BASE_URL/" | grep -oE 'immortalwrt-sdk-[^"]+\.tar\.zst' | sort -u)
+          IB_N=$(printf '%s\n' "$IB_CANDS" | grep -c . || true)
+          SDK_N=$(printf '%s\n' "$SDK_CANDS" | grep -c . || true)
+
+          if [ "$IB_N" -eq 0 ] || [ "$SDK_N" -eq 0 ]; then
             echo "[ERROR] 未在 $BASE_URL/ 找到 ImageBuilder 或 SDK（该 tag 可能未发布官方产物）"
+            echo "[INFO] ImageBuilder 候选数: $IB_N，SDK 候选数: $SDK_N"
             exit 1
           fi
+          if [ "$IB_N" -gt 1 ]; then
+            echo "::error::$BASE_URL/ 下有多个 ImageBuilder 归档，无法自动确定用哪个"
+            printf '%s\n' "$IB_CANDS" | sed 's|^|  |'
+            exit 1
+          fi
+          if [ "$SDK_N" -gt 1 ]; then
+            echo "::error::$BASE_URL/ 下有多个 SDK 归档，无法自动确定用哪个"
+            printf '%s\n' "$SDK_CANDS" | sed 's|^|  |'
+            exit 1
+          fi
+          IB_FILE=$(printf '%s\n' "$IB_CANDS" | head -1)
+          SDK_FILE=$(printf '%s\n' "$SDK_CANDS" | head -1)
 
           curl -fL -o "$IB_FILE" "$BASE_URL/$IB_FILE"
           curl -fL -o "$SDK_FILE" "$BASE_URL/$SDK_FILE"
           echo "[INFO] 已下载 ImageBuilder: $IB_FILE"
           echo "[INFO] 已下载 SDK: $SDK_FILE"
+
+          # ---- 校验归档完整性 ----
+          # 下载被中途截断时 tar 会在解压阶段报错，但错误位置离下载很远，
+          # 容易误判为上游包损坏。这里先做一次只读列表校验，把「下载不完整」
+          # 就地变成显式失败。
+          for arc in "$IB_FILE" "$SDK_FILE"; do
+            if ! tar --zstd -tf "$arc" >/dev/null 2>&1; then
+              echo "::error::归档校验失败（下载不完整或文件损坏）: $arc"
+              ls -l "$arc" || true
+              exit 1
+            fi
+          done
+          echo "[OK] 归档完整性校验通过"
 
           tar --zstd -xf "$IB_FILE"
           tar --zstd -xf "$SDK_FILE"
@@ -940,10 +976,58 @@ jobs:
           # shellcheck disable=SC2086  # PKG_TARGETS 需要按空格分词传入
           make $PKG_TARGETS -j"$(nproc)"
 
+          # ---- 收集产物：后缀不能写死 ----
+          # v25.12.x 用 apk（CONFIG_USE_APK=y，产物 *.apk），
+          # v24.10.x 用 opkg（产物 *.ipk，config/Config-build.in 里 USE_APK 带
+          # `depends on BROKEN`，默认不启用）。
+          # 上游 target/imagebuilder/Makefile 也是按
+          #   PACKAGE_SUFFIX := $(if $(CONFIG_USE_APK),apk,ipk)
+          # 动态判定的（已按 ImmortalWrt v25.12.2 与 v24.10.6 核实）。
+          # 此前写死 '*.apk'：在 v24.10.x 上会一个都找不到，而 find 不匹配时
+          # 不报错，于是拷进 ib/packages/ 的是空目录——构建照样"成功"，
+          # 用户装的第三方包却静默缺失。
           mkdir -p ../ib/packages
-          find bin/packages -name '*.apk' -exec cp -v {} ../ib/packages/ \;
-          echo "[OK] 第三方包产物:"
+          found=$(find bin/packages -type f \( -name '*.apk' -o -name '*.ipk' \) 2>/dev/null | wc -l)
+          if [ "$found" -eq 0 ]; then
+            echo "::error::SDK 编译后未找到任何 *.apk/*.ipk 产物（bin/packages 为空？）"
+            echo "[ERROR] bin/packages 内容:"
+            find bin/packages -type f 2>/dev/null | head -20 || true
+            exit 1
+          fi
+          find bin/packages -type f \( -name '*.apk' -o -name '*.ipk' \) -exec cp -v {} ../ib/packages/ \;
+          echo "[OK] 第三方包产物（共 $found 个）:"
           ls -1 ../ib/packages/
+
+          # ---- 校验：PKG_LIST 中的每个包都真的产出了安装包 ----
+          # 某个包若因依赖不满足/被 SDK 忽略而没有产物，make 未必非零退出，
+          # 这里逐个核对，把「第三方包静默缺失」变成显式失败。
+          # 匹配用「包名后紧跟 -版本号」，版本号一律以数字开头（如
+          # luci-app-openclash-0.47.156.apk）；不用宽松的 [-_].*，否则
+          # dnsmasq 会被 dnsmasq-full-2.93-r1.apk 误判为已产出，掩盖真实缺失。
+          # 包名里的 . + 等正则元字符需转义。
+          ACTUAL_PKGS=$(ls -1 ../ib/packages/ 2>/dev/null || true)
+          missing_pkg=0
+          for name in $PKG_LIST; do
+            esc=$(printf '%s' "$name" | sed 's/[][\\.*^$()+?{}|]/\\&/g')
+            if printf '%s\n' "$ACTUAL_PKGS" | grep -qE "^${esc}(-[0-9][^/]*)?\.(apk|ipk)$"; then
+              echo "[OK] 已产出: $name"
+            else
+              echo "::error::第三方包未产出安装包: $name（make 未报错但产物缺失）"
+              # 列出名字相近的文件：若版本号不以数字开头（罕见），此处能看到
+              # 实际产出的名字，便于判断是"真缺失"还是"匹配过严"。
+              near=$(printf '%s\n' "$ACTUAL_PKGS" | grep -F "$name" || true)
+              if [ -n "$near" ]; then
+                echo "[INFO] 名字相近的产物（供排查）:"
+                printf '%s\n' "$near" | sed 's|^|  |'
+              fi
+              missing_pkg=1
+            fi
+          done
+          if [ "$missing_pkg" -ne 0 ]; then
+            echo "[ERROR] 部分第三方包未编译成功，../ib/packages/ 实际内容:"
+            printf '%s\n' "$ACTUAL_PKGS"
+            exit 1
+          fi
 
       # ----------------------------------------------------------
       # IB.3 组装固件（make image）
@@ -1078,6 +1162,42 @@ jobs:
           else
             make image PROFILE="$PROFILE" PACKAGES="$PACKAGES_LIST"
           fi
+
+          # ---- 校验：用户启用的包真的全部进了固件 ----
+          # PACKAGES_LIST 由 [3.3] 从 Packages.yaml 生成（见 packages_list.txt）。
+          # 若该文件因解析异常为空，make image 会照常构建「官方默认固件」并
+          # 返回成功——用户包一个都没装，却看不出任何报错。这里用上游自己
+          # 生成的 manifest（权威清单）逐个核对，把这种情况变成显式失败。
+          MANIFEST=$(find bin/targets -maxdepth 3 -type f -name '*.manifest' 2>/dev/null | head -1)
+          if [ -z "$MANIFEST" ]; then
+            echo "::error::未找到 *.manifest，无法校验用户软件包是否已装入固件"
+            exit 1
+          fi
+          echo "[INFO] 依据 manifest 校验用户包: $MANIFEST"
+          # manifest 每行形如 `包名 - 版本`（apk）或 `包名 - 版本`（ipk），
+          # 取第一列比对。
+          MANI_NAMES=$(awk '{print $1}' "$MANIFEST" | sort -u)
+          miss=0
+          want=0
+          for p in $PACKAGES_LIST; do
+            [ -n "$p" ] || continue
+            want=$((want + 1))
+            if printf '%s\n' "$MANI_NAMES" | grep -qxF "$p"; then
+              echo "[OK] 已装入固件: $p"
+            else
+              echo "::error::用户包未出现在固件 manifest 中: $p"
+              miss=$((miss + 1))
+            fi
+          done
+          if [ "$want" -eq 0 ]; then
+            echo "::error::PACKAGES 列表为空，固件很可能只含默认包（Packages.yaml 是否解析失败？）"
+            exit 1
+          fi
+          if [ "$miss" -ne 0 ]; then
+            echo "::error::$miss/$want 个用户包未装入固件"
+            exit 1
+          fi
+          echo "[OK] 用户软件包校验通过（$want/$want 已装入固件）"
 
           # ---- 校验 dtb 型号替换确实生效 ----
           # 替换若无声失败，固件照样构建成功、概览页型号却是旧的。
@@ -1279,7 +1399,8 @@ jobs:
             echo "[OK] 本平台产物目录: ${ARTIFACT_DIR}"
             echo "产物清单:"
             find "$ARTIFACT_DIR" -maxdepth 1 -type f | sed 's|^|  |' | head -40
-            echo "APK 包数量: $(find "$ARTIFACT_DIR/packages" -name '*.apk' 2>/dev/null | wc -l)"
+            # 包后缀不写死：v25.12.x 是 .apk，v24.10.x 是 .ipk（见 [IB.2] 说明）
+            echo "安装包数量 (*.apk/*.ipk): $(find "$ARTIFACT_DIR/packages" -type f \( -name '*.apk' -o -name '*.ipk' \) 2>/dev/null | wc -l)"
           else
             echo "[WARN] 本平台产物目录不存在，跳过清单打印: ${ARTIFACT_DIR}"
           fi
@@ -1356,7 +1477,7 @@ jobs:
       # 而不是暂存目录里重命名过的那几个文件。包含：
       #   bin/targets/<平台>/   固件镜像、内核、设备树、
       #                         profiles.json、sha256sums、*.manifest
-      #   bin/packages/<架构>/  编译出的全部 .apk 安装包
+      #   bin/packages/<架构>/  编译出的全部安装包（.apk 或 .ipk，按版本而定）
       # 注意：upload-artifact 默认跳过隐藏文件，这里显式包含。
       #       该参数需要 actions/upload-artifact v4.4.0+，@v4 已满足；
       #       若报 "Unexpected input(s) 'include-hidden-files'"，说明 runner

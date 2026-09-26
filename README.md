@@ -157,7 +157,7 @@
 不编译内核/工具链，而是复用官方预编译产物（与 `tag` 严格对应，保证包 ABI 一致）：
 
 1. **[IB.1]** 下载 `immortalwrt-imagebuilder-<版本>-mediatek-filogic` 与对应 SDK
-2. **[IB.2]** 用 SDK 编译 `Packages.sh` 实际克隆的第三方包（多为 `PKGARCH:=all` 的脚本/主题包，不涉及内核 ABI），产出 `.apk` 放入 ImageBuilder 的 `packages/`
+2. **[IB.2]** 用 SDK 编译 `Packages.sh` 实际克隆的第三方包（多为 `PKGARCH:=all` 的脚本/主题包，不涉及内核 ABI），产出安装包放入 ImageBuilder 的 `packages/`。安装包后缀按版本而定（v25.12.x 为 `.apk`，v24.10.x 为 `.ipk`，上游按 `PACKAGE_SUFFIX := $(if $(CONFIG_USE_APK),apk,ipk)` 动态判定），工作流不写死后缀；若某个包未产出安装包会显式报错，不再静默漏装
 3. **[IB.3]** `make image PROFILE=... PACKAGES="..." [FILES="..."]` 组装固件，`PACKAGES` 列表由 `[3.3]` 从 `Packages.yaml` 生成；`make image` **之前**修改 IB 内 DTS 源的 `model` 属性（现场编译 dtb，型号改名在 dtb 层生效，见下文「设备型号」），`FILES=` 为可选的用户态文件覆盖
 
 > **`FILES=` 是可选项**：`Devices/<设备>/files` 目录不存在时 `[IB.3]` 直接跳过用户态文件覆盖，不报错。使用时**路径不能含空格。** 设备目录名（如 `Cudy TR3000`）含空格，而上游 `include/rules.mk` 的 `file_copy` 里是未加引号的 `$(CP) $(1) $(2)`（`CP:=cp -fpR`），路径会被 shell 拆成两个参数，报两条 `cp: cannot stat` 并让 `prepare_rootfs` 失败（2026-09-25 实测）。因此 `[IB.3]` 先把 `Devices/<设备>/files` 复制到不含空格的中转目录 `$RUNNER_TEMP/ib-files`，再把该路径传给 `FILES=`。`make image` 完成后还会回到 rootfs 逐个核对文件是否落地——上游 `if [ -d '$(2)' ]` 在目录缺失时静默跳过，这一步把「覆盖悄悄失效」变成显式失败。
@@ -199,6 +199,9 @@ dtb 的 model 属性
 - `imagebuilder` 模式下 `cache_enabled` 不生效（无需编译缓存），增量缓存等步骤自动跳过
 - 若目标 tag 尚未发布官方 ImageBuilder，`[IB.1]` 会报错退出，此时改用 `full` 模式
 - 内核模块类第三方包（`kmod-xxx`）需与官方内核 ABI 严格匹配；当前配置已移除 `kmod-oaf`，若将来加回请自行评估
+- **`[IB.1]` 要求归档唯一命中**：同一目录若出现多个 ImageBuilder 或 SDK 归档（多宿主架构、多 gcc 版本等），会列出候选并报错退出，不会静默取第一个；下载后还会做一次归档完整性校验，避免下载被截断后在解压阶段才暴露
+- **`[IB.2]` 会核对第三方包产物**：按版本实际后缀收集（`.apk` 或 `.ipk`），并逐个确认 `Packages.sh` 克隆的每个包都产出了安装包；若有包缺失（make 未报错但产物为空）则显式失败，不会静默漏装
+- **`[IB.3]` 会核对用户包已装入固件**：`make image` 后用上游生成的 `*.manifest` 逐个比对 `Packages.yaml` 里启用的包；若 `packages_list.txt` 异常为空导致只构建出默认固件，会显式失败，不会静默产出缺包的固件
 
 ### ruby YJIT 开关（`ruby_yjit`，仅 full 模式）
 
@@ -426,7 +429,7 @@ device:
 
 ## 输出文件
 
-编译完成后会上传 4 个 Artifact。Artifact 名称以**编译时间** `YYYYMMDD-HHMM` 开头（时区取 job 的 `TZ`，当前 `Asia/Shanghai`），便于在 Actions 页面按编译先后排序；设备型号中的**空格去掉**（如 `CudyTR3000`），避免下载的 zip 文件名带空格。下载后的压缩包名即 `<Artifact 名称>.zip`。
+编译完成后最多上传 4 个 Artifact。Artifact 名称以**编译时间** `YYYYMMDD-HHMM` 开头（时区取 job 的 `TZ`，当前 `Asia/Shanghai`），便于在 Actions 页面按编译先后排序；设备型号中的**空格去掉**（如 `CudyTR3000`），避免下载的 zip 文件名带空格。下载后的压缩包名即 `<Artifact 名称>.zip`。
 
 | Artifact | 下载后文件名 | 内容 |
 |----------|--------------|------|
@@ -435,17 +438,19 @@ device:
 | `...-config` | `20260922-1930-ImmortalWrt-CudyTR3000-v25.12.2-config.zip` | 编译配置，文件名为 `编译时间-设备型号-ImmortalWrt-V版本-构建号-config.config` |
 | `...-full` | `20260922-1930-ImmortalWrt-CudyTR3000-v25.12.2-full.zip` | **完整编译产物**（见下） |
 
+> **`imagebuilder` 模式通常只有 3 个 Artifact（没有 `-recovery`）。** 这不是工作流缺陷，而是上游 ImageBuilder 的固有行为：`recovery` 镜像由 `KERNEL_INITRAMFS` 产出，而 ImageBuilder 在打包时会显式删除预编译的 initramfs 内核（`target/imagebuilder/Makefile` 中的 `rm -f $(IB_KDIR)/vmlinux-initramfs*`，已按 ImmortalWrt v25.12.2 核实），因此无法生成 `*recovery*`；该设备（`cudy_tr3000-v1-ubootmod`）本身有 `IMAGES := sysupgrade.itb`，`full` 模式则会正常产出 `initramfs-recovery.itb`。此时 `[5.3]` 步骤输出一条 `No files were found ...` 的警告并上传 0 个文件，属预期现象。
+
 其中 `-full` 上传的是**整个 `bin` 输出目录**（`bin/`）内的全部内容，而不是单独的几个固件，包含：
 
 - `bin/targets/<平台>/`：固件镜像（含本设备与同平台其他设备的镜像）、内核与设备树（`*Image`、`*.dtb`）、`profiles.json`、`sha256sums`、`*.manifest`
-- `bin/packages/<架构>/`：编译出的全部 `.apk` 安装包
+- `bin/packages/<架构>/`：编译出的全部安装包（v25.12.x 为 `.apk`，v24.10.x 为 `.ipk`）
 
 该步骤显式启用了 `include-hidden-files`（隐藏文件默认不上传）。此参数需要 `actions/upload-artifact` v4.4.0+，`@v4` 已满足；若日志报 `Unexpected input(s) 'include-hidden-files'`，说明所用 v4 版本过旧。
 
 已重命名的固件统一格式为 `编译时间-设备型号-ImmortalWrt-V版本-构建号-类型.扩展名`，例如
 `20260922-1930-Cudy TR3000-ImmortalWrt-V25.12.2-r1234-abcd123-squashfs-sysupgrade.itb`。
 
-编译时间前缀为 `YYYYMMDD-HHMM`（取 `[5.1]` 的执行时刻，时区为 job 的 `TZ`），放在文件名最前面便于按编译先后排序；配置文件与 4 个 Artifact 名称使用同一前缀。
+编译时间前缀为 `YYYYMMDD-HHMM`（取 `[5.1]` 的执行时刻，时区为 job 的 `TZ`），放在文件名最前面便于按编译先后排序；配置文件与各 Artifact 名称使用同一前缀。
 
 设备型号保留原有空格（如 `Cudy TR3000`）；仅在 Artifact 名称中去掉空格（`CudyTR3000`），避免下载的 zip 文件名带空格。
 
