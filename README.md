@@ -188,7 +188,7 @@ dtb 的 model 属性
 | 模式 | 做法 |
 |------|------|
 | `full` | `Customize.sh` 修改源码树 `target/linux/mediatek/dts/<设备>.dts` 的 `model`，编译时生成 dtb |
-| `imagebuilder` | `[IB.3]` 在 `make image` 前修改 IB 内 DTS 源的 `model`。ImageBuilder 不编内核，但 `make image` 会现场编译 dtb（IB 自带 DTS 源与 dtc，dtb 规则为 `FORCE` 每次重编），型号改名在 dtb 层生效 |
+| `imagebuilder` | `[IB.3]` 在 `make image` 前把新型号写进 IB 内**预编译的 dtb**（直接改 dtb 二进制的 model 字符串：整串替换 + 短名补 NUL，fdt 总长与 offset 不变），并同步 sed DTS 源保持一致。新名字节数须 ≤ 原名，否则报错请改用 full |
 
 型号字符串由 `Device.yaml` 的 `Model_dts`（DTS 原始值）与 `Model`（目标值）提供，
 `imagebuilder` 模式下替换带校验：找不到 DTS 文件、或构建后 dtb 仍含旧型号，
@@ -275,6 +275,11 @@ disable_components:
 > `zh_Hans` 的别名（`luci.mk` 的 `LUCI_LC_ALIAS`）。启用新 `luci-app` 时记得同步
 > 补它的 `luci-i18n-<名>-zh-cn`；这些包必须在官方源中存在，否则 `make image`
 > 会因找不到包而失败。
+>
+> **例外**：`luci-i18n-openclash-zh-cn` 在官方源中不存在，**禁止启用**——
+> OpenClash 的 po 目录名是旧式 `zh-cn`，不在 `luci.mk` 的 `LUCI_LANG` 白名单
+> （只有 `zh_Hans`），官方构建不生成它的语言包，启用必报
+> `no such package` 失败（2026-09-26 实测）。
 
 ### Packages.sh
 

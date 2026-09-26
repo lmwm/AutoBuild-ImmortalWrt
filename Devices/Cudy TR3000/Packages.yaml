@@ -18,6 +18,10 @@ enable:
   - luci-i18n-ttyd-zh-cn
   - luci-i18n-wol-zh-cn
   - luci-i18n-autoreboot-zh-cn
+  # luci-i18n-openclash-zh-cn 在官方源中不存在，禁止启用（启用会让
+  # make image 报 "no such package" 失败，2026-09-26 实测）：
+  # OpenClash 的 po 目录名是旧式 zh-cn，不在 luci.mk 的 LUCI_LANG 白名单
+  #（白名单只有 zh_Hans），官方构建不生成它的语言包。
 #  - luci-i18n-openclash-zh-cn
   - luci-i18n-argon-config-zh-cn
 

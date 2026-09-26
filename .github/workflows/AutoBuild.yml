@@ -1002,31 +1002,32 @@ jobs:
           echo "[INFO] PROFILE=$PROFILE"
           echo "[INFO] PACKAGES=$PACKAGES_LIST"
 
-          # ---- 修改 DTS 设备型号（dtb 层改名，全链路生效）----
-          # ImageBuilder 虽不编译内核，但 make image 会现场编译 dtb
-          # （已按 ImmortalWrt v25.12.2 核实）：
-          #   1. target/imagebuilder/Makefile 打包 IB 时带上了
-          #      $(LINUX_DIR)/arch/$(LINUX_KARCH)/boot/dts/*（DTS 源与 dtb）
-          #      以及 scripts/dtc/dtc（dtc 编译器）
-          #   2. include/image.mk 的 dtb 规则：
-          #        $(KDIR)/image-$(1).dtb: FORCE
-          #        $(call Image/BuildDTB,$(DTS_DIR)/<dts>.dts,$$@)
-          #      其中 DTS_DIR:=$(LINUX_DIR)/arch/$(LINUX_KARCH)/boot/dts
-          #      即每次 make image 都从 IB 内的 DTS 源重新编译 dtb
-          #   3. target/imagebuilder/files/Makefile 的 build_image 走
-          #        make -C target/linux/$(BOARD)/image install
-          #      是完整的镜像构建链路
-          # 因此在 make image 之前 sed DTS 的 model 字符串，型号即写进 dtb：
-          # /proc/device-tree/model、/tmp/sysinfo/model、/etc/board.json、
-          # ubus system.board 与 LuCI 概览页全部自动正确，无需用户态补丁。
+          # ---- 修改设备型号（dtb 层改名，全链路生效）----
+          # 型号显示链路（已按 ImmortalWrt v25.12.2 核实）：dtb 的 model 属性
+          # → /proc/device-tree/model → /tmp/sysinfo/model（preinit 02_sysinfo）
+          # → ubus system.board.model（procd 优先读 /tmp/sysinfo/model）
+          # → LuCI 概览页。改 dtb 的 model 即全链路自动正确，无需用户态补丁。
+          #
+          # 关键事实（2026-09-26 实测修正）：ImageBuilder 的 make image 直接使用
+          # tarball 里**预编译**的 dtb（build_dir/.../image-*.dtb），并不会按
+          # include/image.mk 的 `$(KDIR)/image-$(1).dtb: FORCE` 规则重新编译
+          # dtb——此前按「删掉旧 dtb 让 make 重编」实现，结果 mkimage 直接报
+          # `Couldn't open ... No such file or directory`（run 36232135603）。
+          # 因此改名分两步，且**不删除任何 dtb**：
+          #   1) sed DTS 源：保持 IB 内 DTS 与 dtb 一致；若将来 make 行为变化
+          #      真的重编 dtb，编出来的也是改过名的
+          #   2) 直接改 dtb 二进制里的 model 字符串：字符串表中整串替换为新名，
+          #      短的部分补 NUL——fdt 总长与所有 offset 不变，合法且安全；
+          #      新名字节数必须 ≤ 原名，否则显式报错（请缩短 Model，或改用
+          #      full 模式——Customize.sh 改 DTS 无此限制）
           if [ -z "$MODEL_DTS" ]; then
             echo "[INFO] Device.yaml 未定义 Model_dts，跳过型号替换"
           elif [ "$MODEL_DTS" = "$MODEL" ]; then
             echo "[INFO] Model_dts 与 Model 相同，跳过型号替换"
           else
             echo "[INFO] 型号替换: \"$MODEL_DTS\" -> \"$MODEL\""
-            # target/ 与 build_dir/ 两处都找：前者是 IB 自带的 DTS 源目录，
-            # 后者是内核树 DTS_DIR 的副本（dtb 规则的实际输入）。
+            # ---- 1) sed DTS 源（保持源一致）----
+            # target/ 与 build_dir/ 两处都找：前者是 IB 自带的 DTS 源目录。
             # grep -F 按字面匹配；找不到即报错，不做静默跳过。
             MATCHED=$(grep -rl -F --include='*.dts' "$MODEL_DTS" target build_dir 2>/dev/null || true)
             if [ -z "$MATCHED" ]; then
@@ -1041,13 +1042,31 @@ jobs:
               sed -i "s|$SED_FROM|$SED_TO|g" "$f"
               echo "[OK] 已修改 DTS: $f"
             done <<< "$MATCHED"
-            # 删除仍含旧型号的 dtb 二进制：make image 的 FORCE 规则会重新编译，
-            # 这里删除可杜绝旧产物残留混入镜像。
+
+            # ---- 2) 改 dtb 二进制的 model 字符串（注意：不删除任何 dtb）----
             while IFS= read -r d; do
               [ -n "$d" ] || continue
-              if strings "$d" 2>/dev/null | grep -qF "$MODEL_DTS"; then
-                rm -f "$d"
-                echo "[OK] 已删除旧 dtb 产物（make image 将重新编译）: $d"
+              strings "$d" 2>/dev/null | grep -qF "$MODEL_DTS" || continue
+              python3 - "$d" "$MODEL_DTS" "$MODEL" <<'PYEOF'
+          import sys
+          path, old, new = sys.argv[1], sys.argv[2].encode(), sys.argv[3].encode()
+          data = open(path, "rb").read()
+          cnt = data.count(old)
+          if cnt == 0:
+              sys.exit(2)
+          if len(new) > len(old):
+              sys.exit(3)
+          data = data.replace(old, new + b"\x00" * (len(old) - len(new)))
+          open(path, "wb").write(data)
+          print("[OK] dtb 型号已替换（%d 处）: %s" % (cnt, path))
+          PYEOF
+              rc=$?
+              if [ "$rc" -eq 3 ]; then
+                echo "::error::新型号字节数长于原型号，dtb 内无法无损替换；请缩短 Model 或改用 full 模式: $d"
+                exit 1
+              elif [ "$rc" -ne 0 ]; then
+                echo "::error::dtb 型号字符串替换失败: $d (rc=$rc)"
+                exit 1
               fi
             done < <(find build_dir -name '*.dtb' -type f 2>/dev/null)
           fi
@@ -1061,7 +1080,7 @@ jobs:
           fi
 
           # ---- 校验 dtb 型号替换确实生效 ----
-          # sed 替换若无声失败，固件照样构建成功、概览页型号却是旧的。
+          # 替换若无声失败，固件照样构建成功、概览页型号却是旧的。
           # 这里检查全部 dtb 产物，把「静默失效」变成「显式失败」。
           if [ -n "$MODEL_DTS" ] && [ "$MODEL_DTS" != "$MODEL" ]; then
             bad=0
