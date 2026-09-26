@@ -18,7 +18,7 @@ enable:
   - luci-i18n-ttyd-zh-cn
   - luci-i18n-wol-zh-cn
   - luci-i18n-autoreboot-zh-cn
-  - luci-i18n-openclash-zh-cn
+#  - luci-i18n-openclash-zh-cn
   - luci-i18n-argon-config-zh-cn
 
   # LuCI 主题
