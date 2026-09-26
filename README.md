@@ -3,7 +3,8 @@
 使用 GitHub Actions 自动编译 [ImmortalWrt](https://github.com/immortalwrt/immortalwrt) 固件
 
 - 仓库：`lmwm/AutoBuild-ImmortalWrt`
-- 编译工作流：**编译 ImmortalWrt 固件**（`AutoBuild.yml`）
+- 全量编译工作流：**编译 ImmortalWrt 固件（全量编译）**（`FullBuild.yml`）
+- 快速组装工作流：**编译 ImmortalWrt 固件（ImageBuilder）**（`ImageBuilder.yml`）
 - 标签同步工作流：**同步版本标签**（`SyncVersions.yml`）
 
 ## 项目结构
@@ -11,7 +12,8 @@
 ```
 .
 ├── .github/workflows/
-│   ├── AutoBuild.yml          # 编译工作流
+│   ├── FullBuild.yml          # 全量编译工作流（从源码编译，可改内核/DTS）
+│   ├── ImageBuilder.yml       # ImageBuilder 快速组装工作流（分钟级出固件）
 │   └── SyncVersions.yml       # 版本标签同步工作流（定期维护下拉选项）
 ├── Devices/                   # 设备目录（每个设备一个文件夹）
 │   └── Cudy TR3000/           # 目录名与 device 下拉选项值完全一致（含空格）
@@ -26,12 +28,14 @@
 ## 使用方法
 
 1. Fork 本仓库（首次使用建议先手动跑一次 **同步版本标签**，把版本列表补全）
-2. 进入 **Actions** -> **编译 ImmortalWrt 固件**
+2. 进入 **Actions** -> **编译 ImmortalWrt 固件（全量编译）** 或 **编译 ImmortalWrt 固件（ImageBuilder）**
 3. 从下拉列表选择设备与版本 -> 点击 **Run workflow**
-4. 等待编译完成（`full` 模式约 2-3 小时；`imagebuilder` 模式约 10-15 分钟）
+4. 等待编译完成（全量编译约 2-3 小时；ImageBuilder 约 10-15 分钟）
 5. 在 Actions 页面 **Artifacts** 下载固件
 
 ## 工作流参数
+
+### FullBuild.yml（全量编译）
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
@@ -39,8 +43,14 @@
 | `tag` | ImmortalWrt 版本标签（下拉选择） | `latest` |
 | `cache_enabled` | 启用编译缓存（ccache + 源码下载 dl） | `true` |
 | `skip_compile` | 跳过编译（调试模式） | `false` |
-| `build_mode` | 构建方式：`full`=全量编译（可改内核/DTS）；`imagebuilder`=官方 ImageBuilder 快速组装 | `full` |
-| `ruby_yjit` | 启用 ruby YJIT（仅 `full` 模式有效；关闭可甩掉整个 Rust/LLVM 工具链，省 60–130 分钟） | `true` |
+| `ruby_yjit` | 启用 ruby YJIT（关闭可甩掉整个 Rust/LLVM 工具链，省 60–130 分钟） | `true` |
+
+### ImageBuilder.yml（快速组装）
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `device` | 目标设备（下拉选择，值与 `Devices/<名>` 目录名一致） | `Cudy TR3000` |
+| `tag` | ImmortalWrt 版本标签（下拉选择） | `latest` |
 
 ### 版本标签（下拉选择，自动同步）
 
@@ -51,7 +61,7 @@
 | 项目 | 说明 |
 |------|------|
 | 运行时机 | 每周一 03:00 UTC 自动运行，也可手动触发 |
-| 行为 | 从上游拉取全部正式标签（排除 `-rc` 等预发布），取最新 8 个写入 `AutoBuild.yml` 的 `tag.options` |
+| 行为 | 从上游拉取全部正式标签（排除 `-rc` 等预发布），取最新 8 个写入 `FullBuild.yml` 与 `ImageBuilder.yml` 的 `tag.options` |
 | 提交 | 仅在有变化时提交，提交信息为 `配置: 同步 ImmortalWrt 版本标签` |
 | 无变化 | 不产生任何提交 |
 
@@ -61,18 +71,18 @@
 
 > 若发现下拉列表长期未更新：GitHub 对长期无活动的仓库会停用定时工作流，手动触发一次 **同步版本标签** 即可恢复。
 
-### 编译缓存（可选）
+### 编译缓存（可选，仅 FullBuild.yml）
 
-`cache_enabled` 控制两类相互独立的缓存，默认开启：
+`cache_enabled` 控制两类相互独立的缓存，默认开启；`ImageBuilder.yml` 不涉及编译缓存：
 
 | 缓存 | 路径 | 作用 |
 |------|------|------|
 | ccache | `immortalwrt/.ccache` | 缓存 C/C++ 编译产物，重复编译同一版本可大幅提速 |
 | dl | `immortalwrt/dl` | 缓存源码包，避免重复下载，降低上游下载失败风险 |
 
-- **已不再缓存构建树**（`build_dir` + `staging_dir`）。此前那份缓存单独就有 **10.24GB**，超出 GitHub 每仓库 10GB 的配额，会把 ccache 与 dl 一起挤掉；保存一次要 6.5 分钟；而且其配套的 `[5.6]` 裁剪用 `-name 'core.*'` 误删了内核源码里的 `core.h`（`include/net/netns/core.h`），使下一次 `full` 编译恢复该缓存后**必然报错失败**。因此构建树缓存连同配套的 `[2.7]` 时间戳重置、`[5.6]` 裁剪、`[5.7]` 保存一并移除
-- **`full` 模式现在是纯全量编译**：每次从零编译，不再有「增量命中后 15-30 分钟」这一档。加速完全由 ccache 承担——它按 `系统-平台-版本-compiler_check 版本`（当前末尾为 `-cc2`）分键，同平台同版本精确命中；跨版本保留 `restore-keys`，因为 ccache 用源码与命令行哈希校验，版本不符只会失效、不会用错
-- **实测基线**（v25.12.2）：首次全量约 2 小时 51 分，其中 `feeds/packages/lang/ruby`（OpenClash 依赖）独占约 106 分钟——**这类不走 ccache 的巨包无法被 ccache 加速**，是 `full` 模式的主要耗时来源。想缩短 `full` 耗时请用 `ruby_yjit=false`（见下文），需要分钟级出固件请改用 `imagebuilder`
+- **已不再缓存构建树**（`build_dir` + `staging_dir`）。此前那份缓存单独就有 **10.24GB**，超出 GitHub 每仓库 10GB 的配额，会把 ccache 与 dl 一起挤掉；保存一次要 6.5 分钟；而且其配套的 `[5.6]` 裁剪用 `-name 'core.*'` 误删了内核源码里的 `core.h`（`include/net/netns/core.h`），使下一次全量编译恢复该缓存后**必然报错失败**。因此构建树缓存连同配套的 `[2.7]` 时间戳重置、`[5.6]` 裁剪、`[5.7]` 保存一并移除
+- **`FullBuild.yml` 是纯全量编译**：每次从零编译，不再有「增量命中后 15-30 分钟」这一档。加速完全由 ccache 承担——它按 `系统-平台-版本-compiler_check 版本`（当前末尾为 `-cc2`）分键，同平台同版本精确命中；跨版本保留 `restore-keys`，因为 ccache 用源码与命令行哈希校验，版本不符只会失效、不会用错
+- **实测基线**（v25.12.2）：首次全量约 2 小时 51 分，其中 `feeds/packages/lang/ruby`（OpenClash 依赖）独占约 106 分钟——**这类不走 ccache 的巨包无法被 ccache 加速**，是全量编译的主要耗时来源。想缩短全量编译耗时请用 `ruby_yjit=false`（见下文），需要分钟级出固件请改用 `ImageBuilder.yml`
 - dl 按 `系统-平台-版本` 分键且**不跨版本复用**：dl 里是未校验的压缩包，跨版本混用可能导致某个包源码与目标版本不匹配而报校验失败。代价是每个版本各存一份
 - 两个缓存都带平台维度，将来新增不同平台的设备时不会互相污染
 - GitHub 单个缓存上限 10GB（所有缓存条目共享，超出按 LRU 淘汰）；若提示超限，编译不受影响，仅本次不保存对应缓存。`[4.3]` 会打印各构建目录的精确体积
@@ -92,6 +102,8 @@
 - 关闭该开关则每次都从零编译，用于排查缓存引入的疑难问题
 
 ## 编译流程
+
+### FullBuild.yml（全量编译）
 
 ```
 阶段 1: 系统环境初始化
@@ -118,17 +130,41 @@
   [3.6] 同步配置（make defconfig）
   [3.7] 修复 Rust LLVM
 
-阶段 4: 编译固件（仅 build_mode=full）
+阶段 4: 编译固件
   [4.1] 预下载资源
   [4.2] 编译固件（多线程 -> 单线程 -> 详细日志三级重试）
   [4.3] 编译后磁盘使用
 
-阶段 IB: ImageBuilder 快速构建（仅 build_mode=imagebuilder）
+阶段 5: 上传固件
+  [5.1] 整理固件（重命名：编译时间 YYYYMMDD-HHMM 前缀在最前 + 定位编译产物目录）
+  [5.2] 上传 sysupgrade 固件
+  [5.3] 上传 recovery/factory 固件
+  [5.4] 上传配置文件
+  [5.5] 上传完整编译产物（整个 bin 目录）
+```
+
+### ImageBuilder.yml（快速组装）
+
+```
+阶段 1: 系统环境初始化
+  [1.1] 系统信息
+  [1.2] 克隆配置仓库
+  [1.3] 加载设备配置
+
+阶段 2: 环境与版本
+  [2.1] 安装编译环境
+  [2.2] 获取版本标签（实时）
+  [2.3] 确定版本标签（解析 + 校验）
+
+阶段 3: 生成编译配置
+  [3.3] 生成编译配置（Packages.yaml -> packages_list.txt 供 [IB.3] 使用）
+
+阶段 IB: ImageBuilder 快速构建
   [IB.1] 下载 ImageBuilder 与 SDK（与 tag 严格对应）
   [IB.2] SDK 编译第三方包（范围由 Packages.sh 决定，未克隆则跳过）
   [IB.3] 组装固件（make image，设备信息用 FILES= 覆盖）
 
-阶段 5: 上传固件（两种模式共用）
+阶段 5: 上传固件
   [5.1] 整理固件（重命名：编译时间 YYYYMMDD-HHMM 前缀在最前 + 定位编译产物目录）
   [5.2] 上传 sysupgrade 固件
   [5.3] 上传 recovery/factory 固件
@@ -138,12 +174,12 @@
 
 ## 构建方式：full 与 imagebuilder
 
-工作流支持两种构建方式，通过 `build_mode` 参数切换：
+全量编译（full）与 ImageBuilder 快速组装**已拆分为两个独立工作流**，按需求选择其一手动触发：
 
-| 方式 | 耗时 | 适用场景 | 局限 |
-|------|------|----------|------|
-| `full`（默认） | 约 2–3 小时（纯全量，ccache 只能部分加速） | 改内核、改 DTS、改设备定制 | 耗时长；不走 ccache 的巨包（如 ruby）无法加速 |
-| `imagebuilder` | **约 10–15 分钟** | 调整软件包列表、改设备型号 | 不能改内核配置/补丁，不能自编 kmod（ABI 须配官方内核） |
+| 工作流 | 耗时 | 适用场景 | 局限 |
+|--------|------|----------|------|
+| `FullBuild.yml`（full，全量编译） | 约 2–3 小时（纯全量，ccache 只能部分加速） | 改内核、改 DTS、改设备定制 | 耗时长；不走 ccache 的巨包（如 ruby）无法加速 |
+| `ImageBuilder.yml`（imagebuilder，快速组装） | **约 10–15 分钟** | 调整软件包列表、改设备型号 | 不能改内核配置/补丁，不能自编 kmod（ABI 须配官方内核） |
 
 ### imagebuilder 模式的工作方式
 
@@ -159,7 +195,7 @@
 >
 > 若 `Packages.sh` 未克隆任何包（例如克隆语句被注释），该步骤直接跳过，对应软件包由 `[IB.3]` 从官方源安装——**此时需保证 `Packages.yaml` 里启用的包在官方源中存在**，否则 `make image` 会因找不到包而失败。增删第三方包只需改 `Devices/<设备>/` 下的配置，不必再动工作流。
 
-### 设备型号（两种模式）
+### 设备型号（两个工作流）
 
 型号显示的真实链路（已按 ImmortalWrt v25.12.2 核实）：
 
@@ -176,27 +212,27 @@ dtb 的 model 属性
 且 `/tmp/sysinfo/model` 位于 tmpfs、每次启动由 `02_sysinfo` 重新生成，用户态
 一次性补丁无法持久生效。
 
-两种模式都改 dtb，只是位置不同：
+两个工作流都改 dtb，只是位置不同：
 
-| 模式 | 做法 |
+| 工作流 | 做法 |
 |------|------|
-| `full` | `Customize.sh` 修改源码树 `target/linux/mediatek/dts/<设备>.dts` 的 `model`，编译时生成 dtb |
-| `imagebuilder` | `[IB.3]` 在 `make image` 前把新型号写进 IB 内**预编译的 dtb**（直接改 dtb 二进制的 model 字符串：整串替换 + 短名补 NUL，fdt 总长与 offset 不变），并同步 sed DTS 源保持一致。新名字节数须 ≤ 原名，否则报错请改用 full |
+| `FullBuild.yml`（full） | `Customize.sh` 修改源码树 `target/linux/mediatek/dts/<设备>.dts` 的 `model`，编译时生成 dtb |
+| `ImageBuilder.yml`（imagebuilder） | `[IB.3]` 在 `make image` 前把新型号写进 IB 内**预编译的 dtb**（直接改 dtb 二进制的 model 字符串：整串替换 + 短名补 NUL，fdt 总长与 offset 不变），并同步 sed DTS 源保持一致。新名字节数须 ≤ 原名，否则报错请改用 `FullBuild.yml` |
 
 型号字符串由 `Device.yaml` 的 `Model_dts`（DTS 原始值）与 `Model`（目标值）提供，
-`imagebuilder` 模式下替换带校验：找不到 DTS 文件、或构建后 dtb 仍含旧型号，
+`ImageBuilder.yml` 的替换带校验：找不到 DTS 文件、或构建后 dtb 仍含旧型号，
 都会让构建显式失败，不会静默出一个没改名的固件。
 
 ### 注意事项
 
-- `imagebuilder` 模式下 `cache_enabled` 不生效（无需编译缓存），恢复 ccache/dl 等步骤自动跳过
-- 若目标 tag 尚未发布官方 ImageBuilder，`[IB.1]` 会报错退出，此时改用 `full` 模式
+- `ImageBuilder.yml` 不涉及编译缓存（没有 `cache_enabled` 输入，无需 ccache/dl）
+- 若目标 tag 尚未发布官方 ImageBuilder，`[IB.1]` 会报错退出，此时改用 `FullBuild.yml`
 - 内核模块类第三方包（`kmod-xxx`）需与官方内核 ABI 严格匹配；当前配置已移除 `kmod-oaf`，若将来加回请自行评估
 - **`[IB.1]` 要求归档唯一命中**：同一目录若出现多个 ImageBuilder 或 SDK 归档（多宿主架构、多 gcc 版本等），会列出候选并报错退出，不会静默取第一个；下载后还会做一次归档完整性校验，避免下载被截断后在解压阶段才暴露
 - **`[IB.2]` 会核对第三方包产物**：按版本实际后缀收集（`.apk` 或 `.ipk`），并逐个确认 `Packages.sh` 克隆的每个包都产出了安装包；若有包缺失（make 未报错但产物为空）则显式失败，不会静默漏装
 - **`[IB.3]` 会核对用户包已装入固件**：`make image` 后用上游生成的 `*.manifest` 逐个比对 `Packages.yaml` 里启用的包；若 `packages_list.txt` 异常为空导致只构建出默认固件，会显式失败，不会静默产出缺包的固件
 
-### ruby YJIT 开关（`ruby_yjit`，仅 full 模式）
+### ruby YJIT 开关（`ruby_yjit`，仅 FullBuild.yml）
 
 `luci-app-openclash` 依赖 `ruby`，而 ruby 的 `RUBY_ENABLE_YJIT` 在 aarch64 上默认开启；YJIT 是用 Rust 实现的 JIT 编译器，其构建依赖 `PKG_BUILD_DEPENDS: RUBY_ENABLE_YJIT:rust/host`，会拉入整个 Rust/LLVM 工具链。实测 **ruby + rust 合计占编译时间约 77%**（ruby 131 分钟 + rust 与其并行）。
 
@@ -205,7 +241,7 @@ OpenClash 只用 ruby 跑订阅规则转换等一次性短脚本，JIT 加速没
 1. 把 `feeds/packages/lang/ruby/Makefile` 中 `RUBY_ENABLE_YJIT` 的 `default y` 改为 `default n`
 2. 在 `.config` 显式写入 `# CONFIG_RUBY_ENABLE_YJIT is not set`
 
-两者都必须在 `[3.6]` defconfig **之前**完成——依赖解析发生在 defconfig，晚了就拦不住 `rust/host` 被拉入构建图。`imagebuilder` 模式用官方预编译的 ruby 包，不受此开关影响。
+两者都必须在 `[3.6]` defconfig **之前**完成——依赖解析发生在 defconfig，晚了就拦不住 `rust/host` 被拉入构建图。`ImageBuilder.yml` 用官方预编译的 ruby 包，不受此开关影响。
 
 ## 配置文件说明
 
@@ -218,7 +254,7 @@ OpenClash 只用 ruby 跑订阅规则转换等一次性短脚本，JIT 加速没
 Model: "Cudy TR3000"
 
 # DTS 中的原始型号名（dtb model 属性）
-# imagebuilder 模式在 make image 前把它替换为 Model；full 模式由 Customize.sh 处理
+# imagebuilder 工作流在 make image 前把它替换为 Model；full 工作流由 Customize.sh 处理
 # 可选；缺失或与 Model 相同则跳过型号替换
 Model_dts: "Cudy TR3000 v1 (OpenWrt U-Boot layout)"
 
@@ -360,7 +396,7 @@ mkdir -p "Devices/NanoPi R4S"
 
 ```yaml
 Model: "NanoPi R4S"
-# 可选：DTS 中的原始型号名（imagebuilder 模式替换为 Model 用，无需改型号就不写）
+# 可选：DTS 中的原始型号名（ImageBuilder 工作流替换为 Model 用，无需改型号就不写）
 # Model_dts: "..."
 Packages_list: "Packages.yaml"
 Target: "CONFIG_TARGET_rockchip_armv8_DEVICE_friendlyarm_nanopi-r4s=y"
@@ -404,7 +440,7 @@ fi
 
 ### 6. 注册设备
 
-编辑 `.github/workflows/AutoBuild.yml`，在 `device` 的 `options` 中添加：
+编辑 `.github/workflows/FullBuild.yml` 与 `.github/workflows/ImageBuilder.yml`，分别在 `device` 的 `options` 中添加：
 
 ```yaml
 device:
@@ -431,7 +467,7 @@ device:
 | `...-config` | `20260922-1930-ImmortalWrt-CudyTR3000-v25.12.2-config.zip` | 编译配置，文件名为 `编译时间-设备型号-ImmortalWrt-V版本-构建号-config.config` |
 | `...-full` | `20260922-1930-ImmortalWrt-CudyTR3000-v25.12.2-full.zip` | **完整编译产物**（见下） |
 
-> **`imagebuilder` 模式通常只有 3 个 Artifact（没有 `-recovery`）。** 这不是工作流缺陷，而是上游 ImageBuilder 的固有行为：`recovery` 镜像由 `KERNEL_INITRAMFS` 产出，而 ImageBuilder 在打包时会显式删除预编译的 initramfs 内核（`target/imagebuilder/Makefile` 中的 `rm -f $(IB_KDIR)/vmlinux-initramfs*`，已按 ImmortalWrt v25.12.2 核实），因此无法生成 `*recovery*`；该设备（`cudy_tr3000-v1-ubootmod`）本身有 `IMAGES := sysupgrade.itb`，`full` 模式则会正常产出 `initramfs-recovery.itb`。此时 `[5.3]` 步骤输出一条 `No files were found ...` 的警告并上传 0 个文件，属预期现象。
+> **`ImageBuilder.yml` 通常只有 3 个 Artifact（没有 `-recovery`）。** 这不是工作流缺陷，而是上游 ImageBuilder 的固有行为：`recovery` 镜像由 `KERNEL_INITRAMFS` 产出，而 ImageBuilder 在打包时会显式删除预编译的 initramfs 内核（`target/imagebuilder/Makefile` 中的 `rm -f $(IB_KDIR)/vmlinux-initramfs*`，已按 ImmortalWrt v25.12.2 核实），因此无法生成 `*recovery*`；该设备（`cudy_tr3000-v1-ubootmod`）本身有 `IMAGES := sysupgrade.itb`，`FullBuild.yml` 则会正常产出 `initramfs-recovery.itb`。此时 `[5.3]` 步骤输出一条 `No files were found ...` 的警告并上传 0 个文件，属预期现象。
 
 其中 `-full` 上传的是**整个 `bin` 输出目录**（`bin/`）内的全部内容，而不是单独的几个固件，包含：
 

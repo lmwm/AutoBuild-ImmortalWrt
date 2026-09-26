@@ -1,38 +1,46 @@
 #!/usr/bin/env python3
-"""同步 ImmortalWrt 版本标签到 AutoBuild.yml 的下拉选项。
+"""同步 ImmortalWrt 版本标签到编译工作流的下拉选项。
 
-由 .github/workflows/SyncVersions.yml 调用。
+由 .github/workflows/SyncVersions.yml 调用，对每个编译工作流各执行一次。
 
 背景：GitHub Actions 的 workflow_dispatch 下拉选项（type: choice）必须静态写在
 工作流文件中，官方不支持运行时动态生成。因此用定时工作流改写 options 列表。
 
 用法：
-    python3 .github/scripts/SyncTags.py <AutoBuild.yml 路径> <标签文件路径> [保留数量]
+    python3 .github/scripts/SyncTags.py <工作流 yml 路径> <标签文件路径> [保留数量]
 
 标签文件每行一个标签，按版本从新到旧排列。
+支持的工作流文件见 EXPECTED_INPUTS_BY_FILE（按文件名登记各自的输入项集合）。
 """
 
+import os
 import re
 import sys
 
 import yaml
 
-# AutoBuild.yml 中的固定缩进（6/8/10 空格）
+# 各工作流中的固定缩进（6/8/10 空格）
 BLOCK_HEAD = '      tag:\n'
 OPTIONS_KEY = '        options:\n'
 ITEM_INDENT = '          '
 
-# 所有输入项名称，用于校验更新后输入项集合未被改动
-# 注意：此列表必须与 AutoBuild.yml 的 workflow_dispatch.inputs 保持一致，
+# 各工作流文件的输入项名称，用于校验更新后输入项集合未被改动。
+# 注意：此表必须与对应工作流的 workflow_dispatch.inputs 保持一致，
 #       增删输入项时需同步修改，否则本脚本会在写回校验时失败退出。
-EXPECTED_INPUTS = (
-    'device',
-    'tag',
-    'cache_enabled',
-    'skip_compile',
-    'build_mode',
-    'ruby_yjit',
-)
+#       键为工作流文件名（basename），值为该文件应有的全部输入项。
+EXPECTED_INPUTS_BY_FILE = {
+    'FullBuild.yml': (
+        'device',
+        'tag',
+        'cache_enabled',
+        'skip_compile',
+        'ruby_yjit',
+    ),
+    'ImageBuilder.yml': (
+        'device',
+        'tag',
+    ),
+}
 
 
 def build_pattern():
@@ -55,11 +63,20 @@ def parse_options(block: str) -> list[str]:
 
 def main() -> int:
     if len(sys.argv) < 3:
-        print('用法: SyncTags.py <AutoBuild.yml> <标签文件> [保留数量]')
+        print('用法: SyncTags.py <工作流 yml> <标签文件> [保留数量]')
         return 2
 
     build_path, tags_path = sys.argv[1], sys.argv[2]
     keep = int(sys.argv[3]) if len(sys.argv) > 3 else 8
+
+    # 按文件名取该工作流应有输入项集合；未登记的文件直接拒绝，
+    # 避免写坏不认识的工作流（新工作流须先在 EXPECTED_INPUTS_BY_FILE 登记）。
+    wf_name = os.path.basename(build_path)
+    expected_inputs = EXPECTED_INPUTS_BY_FILE.get(wf_name)
+    if expected_inputs is None:
+        print('[ERROR] 未登记的工作流文件: %s' % wf_name)
+        print('        请在 SyncTags.py 的 EXPECTED_INPUTS_BY_FILE 中登记其输入项')
+        return 1
 
     with open(build_path, encoding='utf-8') as f:
         text = f.read()
@@ -112,10 +129,10 @@ def main() -> int:
         return 1
 
     # 双向校验输入项集合：既查丢失，也查新增/改名。
-    # 只查「丢失」会漏掉两类问题：新增输入项后忘记同步本列表（漏检），
+    # 只查「丢失」会漏掉两类问题：新增输入项后忘记同步本表（漏检），
     # 以及输入项被改名（旧名消失、新名出现，同样应显式暴露）。
     actual = set(inputs)
-    expected = set(EXPECTED_INPUTS)
+    expected = set(expected_inputs)
 
     missing = sorted(expected - actual)
     unexpected = sorted(actual - expected)
@@ -126,7 +143,7 @@ def main() -> int:
 
     if unexpected:
         print('[ERROR] 出现未登记的输入项: %s' % ', '.join(unexpected))
-        print('        请同步更新 SyncTags.py 的 EXPECTED_INPUTS')
+        print('        请同步更新 SyncTags.py 的 EXPECTED_INPUTS_BY_FILE')
         return 1
 
     with open(build_path, 'w', encoding='utf-8', newline='\n') as f:

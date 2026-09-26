@@ -1,0 +1,1104 @@
+#
+# AutoBuild ImmortalWrt
+# 仓库：https://github.com/lmwm/AutoBuild-ImmortalWrt
+#
+# ImageBuilder 快速构建工作流：不编译内核/工具链，下载官方 ImageBuilder 与 SDK
+# （与 tag 严格对应，保证包 ABI 一致）后组装固件，约 10-15 分钟
+# 需要改内核/DTS/设备定制请用 FullBuild.yml 全量编译
+#
+# 通过 device 参数选择设备
+# 设备参数从 Devices/<设备名>/Device.yaml 读取
+# 软件包列表从 Devices/<设备名>/Packages.yaml 读取
+# 第三方包由 Devices/<设备名>/Packages.sh 克隆并在 SDK 中编译
+# 步骤编号沿用合并时期的编号（[1.x]/[2.x]/[3.3]/[IB.x]/[5.x]），
+# 便于对照 FullBuild.yml 与文档/排查记录中的步骤锚点
+# 版本标签为下拉选择，选项由「同步版本标签」（SyncVersions.yml）工作流定期维护
+#
+
+name: "编译 ImmortalWrt 固件（ImageBuilder）"
+
+on:
+  workflow_dispatch:
+    inputs:
+      device:
+        description: "目标设备"
+        type: choice
+        options:
+          - "Cudy TR3000"
+        default: "Cudy TR3000"
+        required: true
+      tag:
+        description: "ImmortalWrt 版本标签"
+        type: choice
+        options:
+          - latest
+          - "v25.12.2"
+          - "v25.12.1"
+          - "v25.12.0"
+          - "v24.10.6"
+        default: latest
+        required: true
+
+env:
+  TZ: Asia/Shanghai
+
+jobs:
+  # ============================================================
+  # 固件组装（ImageBuilder）
+  # ============================================================
+  build:
+    runs-on: ubuntu-latest
+    name: "组装固件"
+    timeout-minutes: 360
+
+    steps:
+      # ===========================================================
+      # 阶段 1: 系统环境初始化
+      # ===========================================================
+
+      # ----------------------------------------------------------
+      # 1.1 系统信息
+      # ----------------------------------------------------------
+      - name: "[1.1] 系统信息"
+        run: |
+          echo "=========================================="
+          echo "  系统信息"
+          echo "=========================================="
+          echo ""
+
+          # 系统版本
+          echo "[系统]"
+          echo "  OS: $(cat /etc/os-release | grep PRETTY_NAME | cut -d= -f2 | tr -d '"')"
+          echo "  Kernel: $(uname -r)"
+          echo "  Arch: $(uname -m)"
+          echo ""
+
+          # CPU 信息
+          echo "[CPU]"
+          CPU_MODEL=$(grep "model name" /proc/cpuinfo 2>/dev/null | head -1 | cut -d: -f2 | xargs)
+          CPU_CORES=$(nproc 2>/dev/null || echo "未知")
+          echo "  型号: ${CPU_MODEL:-未知}"
+          echo "  核心: ${CPU_CORES} 核"
+          echo ""
+
+          # 内存信息
+          echo "[内存]"
+          free -h | awk '/^Mem:/ {printf "  总量: %s\n  已用: %s\n  可用: %s\n", $2, $3, $7}'
+          echo ""
+
+          # 磁盘信息
+          echo "[磁盘]"
+          echo "  工作目录: $GITHUB_WORKSPACE"
+          df -hT "$GITHUB_WORKSPACE" | awk 'NR==2 {printf "  文件系统: %s\n  总量: %s\n  已用: %s (%s)\n  可用: %s\n", $1, $2, $3, $5, $4}'
+          echo ""
+
+          echo "=========================================="
+
+      # ----------------------------------------------------------
+      # 1.2 克隆配置仓库
+      # ----------------------------------------------------------
+      - name: "[1.2] 克隆配置仓库"
+        uses: actions/checkout@v4
+
+      # ----------------------------------------------------------
+      # 1.3 加载设备配置
+      # ----------------------------------------------------------
+      - name: "[1.3] 加载设备配置"
+        id: device
+        run: |
+          DEVICE="${{ inputs.device }}"
+          # 下拉选项值即目录名（含空格，如 "Cudy TR3000"）
+          DEVICE_DIR="Devices/${DEVICE}"
+          CONF="${DEVICE_DIR}/Device.yaml"
+
+          if [ ! -f "$CONF" ]; then
+            echo "::error::设备配置不存在: $CONF"
+            exit 1
+          fi
+
+          # 解析 YAML 配置（键名首字母大写；用 sed 而非 awk，避免带空格的值被截断）
+          # 注意：grep '^Model:' 不会误匹配 '^Model_dts:'（要求 Model 后紧跟冒号）
+          DEVICE_MODEL=$(grep '^Model:' "$CONF" | sed 's/^Model: *//' | tr -d '"' | tr -d "'")
+          MODEL_DTS=$(grep '^Model_dts:' "$CONF" | sed 's/^Model_dts: *//' | tr -d '"' | tr -d "'")
+          PACKAGES_LIST=$(grep '^Packages_list:' "$CONF" | sed 's/^Packages_list: *//' | tr -d '"' | tr -d "'")
+          DEVICE_TARGET=$(grep '^Target:' "$CONF" | sed 's/^Target: *//' | tr -d '"' | tr -d "'")
+
+          if [ -z "$DEVICE_MODEL" ] || [ -z "$DEVICE_TARGET" ]; then
+            echo "::error::${CONF} 缺少 Model 或 Target 字段"
+            exit 1
+          fi
+
+          # 从 TARGET 推导平台标识，用于缓存键隔离（不同平台的产物不可混用）
+          # CONFIG_TARGET_mediatek_filogic_DEVICE_xxx=y -> mediatek-filogic
+          PLATFORM_SLUG=""
+          if [ -n "$DEVICE_TARGET" ]; then
+            PLATFORM_SLUG=$(echo "$DEVICE_TARGET" \
+              | sed 's/^CONFIG_TARGET_//' \
+              | sed 's/_DEVICE_.*$//' \
+              | sed 's/_/-/g')
+          fi
+          if [ -z "$PLATFORM_SLUG" ]; then
+            echo "::error::无法从 target 解析平台标识: ${DEVICE_TARGET}"
+            exit 1
+          fi
+
+          echo "device_dir=${DEVICE_DIR}" >> $GITHUB_OUTPUT
+          echo "model=${DEVICE_MODEL}" >> $GITHUB_OUTPUT
+          echo "model_dts=${MODEL_DTS}" >> $GITHUB_OUTPUT
+          echo "packages_list=${PACKAGES_LIST}" >> $GITHUB_OUTPUT
+          echo "target=${DEVICE_TARGET}" >> $GITHUB_OUTPUT
+          echo "platform=${PLATFORM_SLUG}" >> $GITHUB_OUTPUT
+
+          echo "=========================================="
+          echo "  设备配置"
+          echo "=========================================="
+          echo "  设备: ${DEVICE}"
+          echo "  设备目录: ${DEVICE_DIR}"
+          echo "  型号: ${DEVICE_MODEL}"
+          echo "  DTS 原始型号: ${MODEL_DTS:-（未设置）}"
+          echo "  包列表: ${PACKAGES_LIST}"
+          echo "  平台: ${PLATFORM_SLUG}"
+          echo "  TARGET: ${DEVICE_TARGET}"
+          echo "=========================================="
+
+      # ===========================================================
+      # 阶段 2: 环境与版本
+      # ===========================================================
+
+      # ----------------------------------------------------------
+      # 2.1 安装编译环境
+      # ----------------------------------------------------------
+      - name: "[2.1] 安装编译环境"
+        run: |
+          echo "=========================================="
+          echo "  安装编译环境"
+          echo "=========================================="
+
+          sudo apt-get update -y
+          sudo apt-get upgrade -y
+
+          sudo apt-get install -y --no-install-recommends \
+            ack antlr3 asciidoc autoconf automake autopoint binutils bison \
+            build-essential bzip2 ccache clang cmake cpio curl \
+            device-tree-compiler ecj fastjar flex gawk gettext \
+            gcc-multilib g++-multilib git gnutls-dev gperf haveged help2man \
+            intltool lib32gcc-s1 libc6-dev-i386 libelf-dev libglib2.0-dev \
+            libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses-dev \
+            libpython3-dev libreadline-dev libssl-dev libtool libyaml-dev \
+            libz-dev lld llvm lrzsz mkisofs msmtp nano ninja-build p7zip \
+            p7zip-full patch pkgconf python3 python3-pip python3-ply \
+            python3-docutils python3-pyelftools python3-setuptools qemu-utils \
+            re2c rsync scons squashfs-tools subversion swig texinfo uglifyjs \
+            upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd
+
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+          echo "[OK] 编译环境安装完成"
+          echo "=========================================="
+
+      # ----------------------------------------------------------
+      # 2.2 获取并校验版本标签（实时，不使用硬编码列表）
+      # ----------------------------------------------------------
+      - name: "[2.2] 获取版本标签"
+        run: |
+          echo "=========================================="
+          echo "  获取 ImmortalWrt 版本标签（实时）"
+          echo "=========================================="
+
+          UPSTREAM="https://github.com/immortalwrt/immortalwrt.git"
+
+          # 分两步：先落盘再过滤，这样 $? 反映的是 git 自身的退出码，不会被管道掩盖
+          for attempt in 1 2 3; do
+            if git ls-remote --tags --sort=-v:refname "$UPSTREAM" > tags_raw.txt 2>/dev/null; then
+              grep -oP 'refs/tags/\K[v0-9.]+$' tags_raw.txt > tags_all.txt || true
+              if [ -s tags_all.txt ]; then
+                echo "[OK] 标签获取成功（第 ${attempt} 次尝试）"
+                break
+              fi
+            fi
+
+            echo "[WARN] 获取标签失败，5 秒后重试（第 ${attempt}/3 次）"
+            sleep 5
+          done
+
+          if [ ! -s tags_all.txt ]; then
+            echo "::error::无法从上游获取版本标签，请稍后重试"
+            exit 1
+          fi
+
+          # 去重（annotated tag 可能重复出现），保持上游的版本倒序
+          awk '!seen[$0]++' tags_all.txt > tags.txt
+
+          echo "[OK] 上游可用版本标签（最新在前）:"
+          sed 's/^/  - /' tags.txt
+          echo ""
+
+      # ----------------------------------------------------------
+      # 2.3 确定版本标签
+      # ----------------------------------------------------------
+      - name: "[2.3] 确定版本标签"
+        id: version
+        run: |
+          INPUT_TAG="${{ inputs.tag }}"
+          LATEST_TAG=$(head -1 tags.txt)
+
+          echo "=========================================="
+          echo "  确定 ImmortalWrt 版本"
+          echo "=========================================="
+
+          if [ "$INPUT_TAG" = "latest" ]; then
+            TAG="$LATEST_TAG"
+            echo "[OK] latest -> 最新版本: $TAG"
+          else
+            TAG="$INPUT_TAG"
+            if ! grep -qxF "$TAG" tags.txt; then
+              echo "::error::版本标签不存在: $TAG"
+              echo "[ERROR] 上游当前可用标签:"
+              sed 's/^/  - /' tags.txt
+              exit 1
+            fi
+            echo "[OK] 使用指定版本: $TAG"
+          fi
+
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "  上游最新版本: ${LATEST_TAG}"
+
+          echo "=========================================="
+
+      # ===========================================================
+      # 阶段 3: 生成编译配置
+      # ===========================================================
+
+      # ----------------------------------------------------------
+      # 3.3 生成编译配置
+      # ----------------------------------------------------------
+      - name: "[3.3] 生成编译配置"
+        run: |
+          DEVICE_DIR="${{ steps.device.outputs.device_dir }}"
+          PACKAGES_LIST="${{ steps.device.outputs.packages_list }}"
+          DEVICE_TARGET="${{ steps.device.outputs.target }}"
+
+          echo "=========================================="
+          echo "  生成编译配置"
+          echo "=========================================="
+
+          # 创建初始配置：写入设备 TARGET
+          # （本工作流不克隆源码，immortalwrt 仅为 .config 的载体目录；
+          #   生成的 .config 同时作为 PACKAGES 列表的载体，供 [IB.3] 提取）
+          mkdir -p immortalwrt
+          if [ -n "$DEVICE_TARGET" ]; then
+            echo "$DEVICE_TARGET" > immortalwrt/.config
+            echo "[OK] 设置设备 TARGET: $DEVICE_TARGET"
+          else
+            echo "[WARN] 未设置设备 TARGET，使用默认配置"
+            touch immortalwrt/.config
+          fi
+
+          # 如果存在 Packages.yaml，解析启用和禁用的包
+          if [ -n "$PACKAGES_LIST" ] && [ -f "${DEVICE_DIR}/${PACKAGES_LIST}" ]; then
+            PACKAGES_FILE="${DEVICE_DIR}/${PACKAGES_LIST}"
+
+            # 解析启用的包
+            echo ""
+            echo "启用的包:"
+            in_enable=false
+            while IFS= read -r line; do
+              # 检测 enable: 段落
+              if echo "$line" | grep -q "^enable:"; then
+                in_enable=true
+                continue
+              fi
+              # 检测 disable: 段落（结束 enable）
+              if echo "$line" | grep -q "^disable:"; then
+                in_enable=false
+                continue
+              fi
+              # 处理 enable 段落的包
+              if [ "$in_enable" = true ]; then
+                pkg=$(echo "$line" | sed 's/^[[:space:]]*- //' | sed 's/#.*//' | xargs)
+                if [ -n "$pkg" ]; then
+                  echo "CONFIG_PACKAGE_${pkg}=y" >> immortalwrt/.config
+                  echo "  + ${pkg}"
+                fi
+              fi
+            done < "$PACKAGES_FILE"
+
+            # 解析禁用的包
+            echo ""
+            echo "禁用的包:"
+            in_disable=false
+            while IFS= read -r line; do
+              # 检测 disable: 段落
+              if echo "$line" | grep -q "^disable:"; then
+                in_disable=true
+                continue
+              fi
+              # 检测 disable_components: 段落（结束 disable）
+              if echo "$line" | grep -q "^disable_components:"; then
+                in_disable=false
+                continue
+              fi
+              # 处理 disable 段落的包
+              if [ "$in_disable" = true ]; then
+                pkg=$(echo "$line" | sed 's/^[[:space:]]*- //' | sed 's/#.*//' | xargs)
+                if [ -n "$pkg" ]; then
+                  echo "# CONFIG_PACKAGE_${pkg} is not set" >> immortalwrt/.config
+                  echo "  - ${pkg}"
+                fi
+              fi
+            done < "$PACKAGES_FILE"
+
+            # 解析禁用的子组件
+            echo ""
+            echo "禁用的子组件:"
+            in_components=false
+            current_pkg=""
+            while IFS= read -r line; do
+              # 检测 disable_components: 段落
+              if echo "$line" | grep -q "^disable_components:"; then
+                in_components=true
+                continue
+              fi
+              # 检测包名（如 luci-app-passwall:）
+              if [ "$in_components" = true ] && echo "$line" | grep -qE "^[[:space:]]+[a-zA-Z].*:"; then
+                current_pkg=$(echo "$line" | sed 's/^[[:space:]]*//' | sed 's/:.*//' | xargs)
+                continue
+              fi
+              # 检测下一个顶级键（结束）
+              if echo "$line" | grep -q "^[a-zA-Z]" && ! echo "$line" | grep -q "^disable_components:"; then
+                in_components=false
+                current_pkg=""
+                continue
+              fi
+              # 处理子组件
+              if [ "$in_components" = true ] && [ -n "$current_pkg" ]; then
+                component=$(echo "$line" | sed 's/^[[:space:]]*- //' | sed 's/#.*//' | xargs)
+                if [ -n "$component" ]; then
+                  echo "# CONFIG_PACKAGE_${current_pkg}_${component} is not set" >> immortalwrt/.config
+                  echo "  - ${current_pkg}_${component}"
+                fi
+              fi
+            done < "$PACKAGES_FILE"
+          else
+            echo "[INFO] 无 packages 配置文件，跳过"
+          fi
+
+          # 生成 PACKAGES 列表（供 [IB.3] 的 make image 使用）
+          grep '^CONFIG_PACKAGE_.*=y' immortalwrt/.config \
+            | sed 's/^CONFIG_PACKAGE_//; s/=y$//' \
+            | sort -u > packages_list.txt
+          echo "[INFO] PACKAGES 列表: $(wc -l < packages_list.txt) 个包 -> packages_list.txt"
+
+          echo ""
+          echo "[OK] 配置文件已生成"
+          echo "=========================================="
+
+      # ===========================================================
+      # 阶段 IB: ImageBuilder 快速构建
+      #
+      # 本工作流的主体。不编译内核/工具链，而是下载官方 ImageBuilder 与
+      # SDK（与 tag 严格对应，保证包 ABI 一致）：
+      #   [IB.1] 下载并解压 ImageBuilder 与 SDK
+      #   [IB.2] 用 SDK 编译 Packages.sh 实际克隆的第三方包（多为
+      #          PKGARCH:=all 的脚本/主题包，无内核 ABI 问题），产出安装包
+      #          （.apk 或 .ipk，按版本而定）放入 ImageBuilder 的 packages/；
+      #          未克隆任何包时整步跳过
+      #   [IB.3] make image 组装固件；设备型号在 make image 前修改 IB 内
+      #          DTS 源的 model 属性（现场编译 dtb，dtb 层生效）；
+      #          FILES= 目录覆盖用户态文件（可选）
+      #
+      # 预期总耗时 10-15 分钟。输出目录与全量编译一致
+      # （bin/targets/<平台>/），因此 [5.x] 上传可共用。
+      # ===========================================================
+
+      # ----------------------------------------------------------
+      # IB.1 下载 ImageBuilder 与 SDK
+      # ----------------------------------------------------------
+      - name: "[IB.1] 下载 ImageBuilder 与 SDK"
+        run: |
+          VER="${{ steps.version.outputs.tag }}"
+          VER_RAW="${VER#v}"
+          DEVICE_TARGET="${{ steps.device.outputs.target }}"
+          TARGET_PART=$(echo "$DEVICE_TARGET" | sed 's/CONFIG_TARGET_//' | sed 's/_DEVICE_.*//')
+          PLATFORM_PATH=$(echo "$TARGET_PART" | sed 's/_/\//g')
+          BASE_URL="https://downloads.immortalwrt.org/releases/${VER_RAW}/targets/${PLATFORM_PATH}"
+          echo "[INFO] 下载源: $BASE_URL"
+
+          # ---- 选定 ImageBuilder / SDK 归档 ----
+          # 不能 `... | head -1` 静默取第一个：上游同一目录若出现多个候选
+          # （多宿主架构、多 gcc 版本、或上游改了命名），取第一个可能拿到
+          # 不匹配的归档，而错误要到很后面才以别的形式暴露。
+          # 这里要求唯一命中：0 个 -> 明确报错；>=2 个 -> 列出候选并要求
+          # 人工确认，不猜。
+          IB_CANDS=$(curl -fsSL "$BASE_URL/" | grep -oE 'immortalwrt-imagebuilder-[^"]+\.tar\.zst' | sort -u)
+          SDK_CANDS=$(curl -fsSL "$BASE_URL/" | grep -oE 'immortalwrt-sdk-[^"]+\.tar\.zst' | sort -u)
+          IB_N=$(printf '%s\n' "$IB_CANDS" | grep -c . || true)
+          SDK_N=$(printf '%s\n' "$SDK_CANDS" | grep -c . || true)
+
+          if [ "$IB_N" -eq 0 ] || [ "$SDK_N" -eq 0 ]; then
+            echo "[ERROR] 未在 $BASE_URL/ 找到 ImageBuilder 或 SDK（该 tag 可能未发布官方产物）"
+            echo "[INFO] ImageBuilder 候选数: $IB_N，SDK 候选数: $SDK_N"
+            exit 1
+          fi
+          if [ "$IB_N" -gt 1 ]; then
+            echo "::error::$BASE_URL/ 下有多个 ImageBuilder 归档，无法自动确定用哪个"
+            printf '%s\n' "$IB_CANDS" | sed 's|^|  |'
+            exit 1
+          fi
+          if [ "$SDK_N" -gt 1 ]; then
+            echo "::error::$BASE_URL/ 下有多个 SDK 归档，无法自动确定用哪个"
+            printf '%s\n' "$SDK_CANDS" | sed 's|^|  |'
+            exit 1
+          fi
+          IB_FILE=$(printf '%s\n' "$IB_CANDS" | head -1)
+          SDK_FILE=$(printf '%s\n' "$SDK_CANDS" | head -1)
+
+          curl -fL -o "$IB_FILE" "$BASE_URL/$IB_FILE"
+          curl -fL -o "$SDK_FILE" "$BASE_URL/$SDK_FILE"
+          echo "[INFO] 已下载 ImageBuilder: $IB_FILE"
+          echo "[INFO] 已下载 SDK: $SDK_FILE"
+
+          # ---- 校验归档完整性 ----
+          # 下载被中途截断时 tar 会在解压阶段报错，但错误位置离下载很远，
+          # 容易误判为上游包损坏。这里先做一次只读列表校验，把「下载不完整」
+          # 就地变成显式失败。
+          for arc in "$IB_FILE" "$SDK_FILE"; do
+            if ! tar --zstd -tf "$arc" >/dev/null 2>&1; then
+              echo "::error::归档校验失败（下载不完整或文件损坏）: $arc"
+              ls -l "$arc" || true
+              exit 1
+            fi
+          done
+          echo "[OK] 归档完整性校验通过"
+
+          tar --zstd -xf "$IB_FILE"
+          tar --zstd -xf "$SDK_FILE"
+
+          # 不能用 `mv immortalwrt-imagebuilder-* ib`：解压后压缩包仍在原处，
+          # 通配符会同时匹配到「压缩包」和「解压出的目录」两个对象。GNU mv 在
+          # 「多源 + 目标不存在」时会把末位参数当目标目录，于是报
+          # `mv: target 'ib': No such file or directory`（sdk 同理）。
+          # 这里只挑目录，且限定 maxdepth 1，避免递归匹配到子目录。
+          IB_DIRS=$(find . -maxdepth 1 -type d -name 'immortalwrt-imagebuilder-*')
+          SDK_DIRS=$(find . -maxdepth 1 -type d -name 'immortalwrt-sdk-*')
+          IB_DIR=$(printf '%s\n' "$IB_DIRS" | head -1)
+          SDK_DIR=$(printf '%s\n' "$SDK_DIRS" | head -1)
+
+          if [ -z "$IB_DIR" ] || [ -z "$SDK_DIR" ]; then
+            echo "::error::解压后未找到 ImageBuilder 或 SDK 目录"
+            echo "[ERROR] 当前目录内容:"
+            ls -1
+            exit 1
+          fi
+
+          # 正常情况下各自只有一个顶层目录；多于一个说明上游打包结构有变化，
+          # 此时列出全部候选以便排查（仍取第一个，不因此中断构建）。
+          if [ "$(printf '%s\n' "$IB_DIRS" | grep -c .)" -gt 1 ]; then
+            echo "[WARN] 匹配到多个 ImageBuilder 目录，取第一个:"
+            printf '%s\n' "$IB_DIRS" | sed 's|^|  |'
+          fi
+          if [ "$(printf '%s\n' "$SDK_DIRS" | grep -c .)" -gt 1 ]; then
+            echo "[WARN] 匹配到多个 SDK 目录，取第一个:"
+            printf '%s\n' "$SDK_DIRS" | sed 's|^|  |'
+          fi
+
+          mv "$IB_DIR" ib
+          mv "$SDK_DIR" sdk
+          echo "[OK] ImageBuilder 目录: $IB_DIR -> ib"
+          echo "[OK] SDK 目录: $SDK_DIR -> sdk"
+          echo "PLATFORM_PATH=$PLATFORM_PATH" >> $GITHUB_ENV
+
+      # ----------------------------------------------------------
+      # IB.2 SDK 编译第三方包
+      #
+      # Packages.sh 依赖 $OPENWRT_DIR=pwd，SDK 的目录结构与源码树兼容，
+      # 可直接复用。第三方包多为 PKGARCH:=all（脚本/主题），不涉及内核 ABI。
+      #
+      # 编译范围由 Packages.sh 决定，不在本文件硬编码包名：
+      # 此前这里写死四个包名，一旦 Packages.sh 里的克隆被注释掉，仍会执行
+      # make package/<包>/compile 并报 build failed（2026-09-25 实测）。
+      # 现在改为「Packages.sh 克隆了什么就编译什么」，未克隆任何包时整步跳过，
+      # 由 [IB.3] 直接从官方源安装。以后增删第三方包只需改 Devices/ 下的配置。
+      # ----------------------------------------------------------
+      - name: "[IB.2] SDK 编译第三方包"
+        run: |
+          DEVICE_DIR="${{ steps.device.outputs.device_dir }}"
+          # 必须用绝对路径：本步骤随后 cd 到 sdk，相对路径 Devices/... 会
+          # 变成 sdk/Devices/...，导致 cp 报 cannot stat 而失败。
+          DEVICE_ABS="$GITHUB_WORKSPACE/$DEVICE_DIR"
+          if [ ! -f "$DEVICE_ABS/Packages.sh" ]; then
+            echo "::error::未找到 $DEVICE_ABS/Packages.sh"
+            exit 1
+          fi
+          cd sdk
+          cp "$DEVICE_ABS/Packages.sh" .
+
+          # 顺序很重要：先 feeds update/install，再执行 Packages.sh，与 full 模式的
+          # [2.6] -> [3.1] 保持一致。Packages.sh 的职责是「先删掉 feeds 中的旧版本
+          # 符号链接，再克隆自定义版本」；若顺序颠倒，feeds install 会把
+          # package/feeds/luci/luci-theme-argon 之类的链接重新装回来，既让
+          # Packages.sh 的删除动作落空，也让同名包出现两份定义。
+          # 附带好处：feeds install 会创建 package/feeds/，Packages.sh 里的
+          # find 因此有目录可扫（SDK 初始状态并没有这个目录）。
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+          # ---- 识别 Packages.sh 实际克隆进来的包 ----
+          # 用「执行前后 package/ 下 Makefile 集合的差集」定位新增文件，
+          # 不依赖 Packages.sh 把包克隆到哪个目录，也不依赖包名约定。
+          find package -name Makefile -type f 2>/dev/null | LC_ALL=C sort > /tmp/pkg_before.txt
+          bash Packages.sh
+          find package -name Makefile -type f 2>/dev/null | LC_ALL=C sort > /tmp/pkg_after.txt
+          NEW_MKS=$(comm -13 /tmp/pkg_before.txt /tmp/pkg_after.txt || true)
+
+          PKG_TARGETS=""
+          PKG_LIST=""
+          while IFS= read -r mk; do
+            [ -n "$mk" ] || continue
+            # 只认真正的包定义：含 BuildPackage，或 include 了 package.mk / luci.mk。
+            # 这一条用于排除仓库里附带的纯工具 Makefile，例如 OpenClash 的
+            # luci-app-openclash/tools/po2lmo/Makefile（它不含包定义，若被当成
+            # 包处理会取错名字）。
+            grep -qE 'BuildPackage|/package\.mk|/luci\.mk' "$mk" 2>/dev/null || continue
+            # 取包名：优先 Makefile 里的 PKG_NAME:=，否则回退为所在目录名
+            #（luci.mk 中 LUCI_NAME?=$(notdir ${CURDIR})、PKG_NAME?=$(LUCI_NAME)，
+            #   因此目录名就是包名）。
+            name=$(sed -n 's/^[[:space:]]*PKG_NAME[[:space:]]*:*=[[:space:]]*//p' "$mk" | head -1)
+            [ -n "$name" ] || name=$(basename "$(dirname "$mk")")
+            PKG_TARGETS="$PKG_TARGETS package/$name/compile"
+            PKG_LIST="$PKG_LIST $name"
+          done <<< "$NEW_MKS"
+
+          if [ -z "$PKG_TARGETS" ]; then
+            echo "[INFO] Packages.sh 未克隆任何第三方包，跳过 SDK 编译"
+            echo "[INFO] [IB.3] 将直接从官方软件源安装对应软件包"
+            mkdir -p ../ib/packages
+            exit 0
+          fi
+
+          echo "[INFO] 待编译的第三方包:${PKG_LIST}"
+
+          # 仅启用识别出的包，避免把不存在的包写进 .config
+          : > .config
+          for t in $PKG_TARGETS; do
+            name=${t#package/}
+            name=${name%/compile}
+            echo "CONFIG_PACKAGE_${name}=y" >> .config
+          done
+          make defconfig
+
+          # shellcheck disable=SC2086  # PKG_TARGETS 需要按空格分词传入
+          make $PKG_TARGETS -j"$(nproc)"
+
+          # ---- 收集产物：后缀不能写死 ----
+          # v25.12.x 用 apk（CONFIG_USE_APK=y，产物 *.apk），
+          # v24.10.x 用 opkg（产物 *.ipk，config/Config-build.in 里 USE_APK 带
+          # `depends on BROKEN`，默认不启用）。
+          # 上游 target/imagebuilder/Makefile 也是按
+          #   PACKAGE_SUFFIX := $(if $(CONFIG_USE_APK),apk,ipk)
+          # 动态判定的（已按 ImmortalWrt v25.12.2 与 v24.10.6 核实）。
+          # 此前写死 '*.apk'：在 v24.10.x 上会一个都找不到，而 find 不匹配时
+          # 不报错，于是拷进 ib/packages/ 的是空目录——构建照样"成功"，
+          # 用户装的第三方包却静默缺失。
+          mkdir -p ../ib/packages
+          found=$(find bin/packages -type f \( -name '*.apk' -o -name '*.ipk' \) 2>/dev/null | wc -l)
+          if [ "$found" -eq 0 ]; then
+            echo "::error::SDK 编译后未找到任何 *.apk/*.ipk 产物（bin/packages 为空？）"
+            echo "[ERROR] bin/packages 内容:"
+            find bin/packages -type f 2>/dev/null | head -20 || true
+            exit 1
+          fi
+          find bin/packages -type f \( -name '*.apk' -o -name '*.ipk' \) -exec cp -v {} ../ib/packages/ \;
+          echo "[OK] 第三方包产物（共 $found 个）:"
+          ls -1 ../ib/packages/
+
+          # ---- 校验：PKG_LIST 中的每个包都真的产出了安装包 ----
+          # 某个包若因依赖不满足/被 SDK 忽略而没有产物，make 未必非零退出，
+          # 这里逐个核对，把「第三方包静默缺失」变成显式失败。
+          # 匹配用「包名后紧跟 -版本号」，版本号一律以数字开头（如
+          # luci-app-openclash-0.47.156.apk）；不用宽松的 [-_].*，否则
+          # dnsmasq 会被 dnsmasq-full-2.93-r1.apk 误判为已产出，掩盖真实缺失。
+          # 包名里的 . + 等正则元字符需转义。
+          ACTUAL_PKGS=$(ls -1 ../ib/packages/ 2>/dev/null || true)
+          missing_pkg=0
+          for name in $PKG_LIST; do
+            esc=$(printf '%s' "$name" | sed 's/[][\\.*^$()+?{}|]/\\&/g')
+            if printf '%s\n' "$ACTUAL_PKGS" | grep -qE "^${esc}(-[0-9][^/]*)?\.(apk|ipk)$"; then
+              echo "[OK] 已产出: $name"
+            else
+              echo "::error::第三方包未产出安装包: $name（make 未报错但产物缺失）"
+              # 列出名字相近的文件：若版本号不以数字开头（罕见），此处能看到
+              # 实际产出的名字，便于判断是"真缺失"还是"匹配过严"。
+              near=$(printf '%s\n' "$ACTUAL_PKGS" | grep -F "$name" || true)
+              if [ -n "$near" ]; then
+                echo "[INFO] 名字相近的产物（供排查）:"
+                printf '%s\n' "$near" | sed 's|^|  |'
+              fi
+              missing_pkg=1
+            fi
+          done
+          if [ "$missing_pkg" -ne 0 ]; then
+            echo "[ERROR] 部分第三方包未编译成功，../ib/packages/ 实际内容:"
+            printf '%s\n' "$ACTUAL_PKGS"
+            exit 1
+          fi
+
+      # ----------------------------------------------------------
+      # IB.3 组装固件（make image）
+      #
+      # PACKAGES 列表由 [3.3] 从 Packages.yaml 生成（packages_list.txt）。
+      # 设备型号：make image 前修改 IB 内 DTS 源的 model 属性——make image
+      #           会现场编译 dtb，型号在 dtb 层生效，全链路自动正确。
+      # FILES=：可选，指向 Devices/<设备>/files，在运行时覆盖用户态文件。
+      # ----------------------------------------------------------
+      - name: "[IB.3] 组装固件 (make image)"
+        run: |
+          DEVICE_DIR="${{ steps.device.outputs.device_dir }}"
+          DEVICE_TARGET="${{ steps.device.outputs.target }}"
+          MODEL="${{ steps.device.outputs.model }}"
+          MODEL_DTS="${{ steps.device.outputs.model_dts }}"
+          PROFILE=$(echo "$DEVICE_TARGET" | sed 's/.*_DEVICE_//' | sed 's/=y$//')
+          PACKAGES_LIST=$(tr '\n' ' ' < packages_list.txt)
+          # FILES 源目录必须用绝对路径：下面会 cd ib，相对路径会变成 ib/Devices/...。
+          # 设备型号改名不走 FILES（见下方 DTS 型号替换段），FILES 现在是可选项：
+          # Devices/<设备>/files 目录不存在时直接跳过用户态文件覆盖。
+          FILES_SRC="$GITHUB_WORKSPACE/$DEVICE_DIR/files"
+
+          FILES_ABS=""
+          if [ -d "$FILES_SRC" ]; then
+            # ---- FILES 路径不能含空格（否则 make image 必定失败）----
+            # 设备目录名是 "Cudy TR3000"，路径里的空格会被上游拆开。链路已按
+            # ImmortalWrt v25.12.2 核实：
+            #   target/imagebuilder/files/Makefile 的 image 目标
+            #     $(if $(FILES),USER_FILES="$(FILES)")
+            #   -> include/rootfs.mk 的 prepare_rootfs
+            #     $(call file_copy,$(2)/.,$(1))
+            #   -> include/rules.mk 的 file_copy（$(CP) 即 `cp -fpR`）
+            #     $(CP) $(1) $(2)          # 这一行没有加引号
+            # 于是 shell 收到两个源参数 `.../Devices/Cudy` 与 `TR3000/files/.`，
+            # 报两条 `cp: cannot stat` 并让 prepare_rootfs 以 Error 1 退出。
+            # 注意 make 变量层的引号（USER_FILES="$(FILES)"）挡不住这一步：真正的
+            # 拆分发生在 make 展开成 shell 命令之后。
+            # 因此把内容复制到一个不含空格的中转目录再传给 FILES=。不能用
+            # ib/files —— 那是上游 ImageBuilder 自带的目录（含 Makefile 等）。
+            FILES_ABS="${RUNNER_TEMP:-/tmp}/ib-files"
+            case "$FILES_ABS" in
+              *" "*)
+                echo "::error::FILES 中转目录含空格，上游 file_copy 会拆分路径: $FILES_ABS"
+                exit 1
+                ;;
+            esac
+            rm -rf "$FILES_ABS"
+            mkdir -p "$FILES_ABS"
+            cp -a "$FILES_SRC/." "$FILES_ABS/"
+          else
+            echo "[INFO] 无 FILES 目录（$FILES_SRC），跳过用户态文件覆盖"
+          fi
+
+          cd ib
+          echo "[INFO] PROFILE=$PROFILE"
+          echo "[INFO] PACKAGES=$PACKAGES_LIST"
+
+          # ---- 修改设备型号（dtb 层改名，全链路生效）----
+          # 型号显示链路（已按 ImmortalWrt v25.12.2 核实）：dtb 的 model 属性
+          # → /proc/device-tree/model → /tmp/sysinfo/model（preinit 02_sysinfo）
+          # → ubus system.board.model（procd 优先读 /tmp/sysinfo/model）
+          # → LuCI 概览页。改 dtb 的 model 即全链路自动正确，无需用户态补丁。
+          #
+          # 关键事实（2026-09-26 实测修正）：ImageBuilder 的 make image 直接使用
+          # tarball 里**预编译**的 dtb（build_dir/.../image-*.dtb），并不会按
+          # include/image.mk 的 `$(KDIR)/image-$(1).dtb: FORCE` 规则重新编译
+          # dtb——此前按「删掉旧 dtb 让 make 重编」实现，结果 mkimage 直接报
+          # `Couldn't open ... No such file or directory`（run 36232135603）。
+          # 因此改名分两步，且**不删除任何 dtb**：
+          #   1) sed DTS 源：保持 IB 内 DTS 与 dtb 一致；若将来 make 行为变化
+          #      真的重编 dtb，编出来的也是改过名的
+          #   2) 直接改 dtb 二进制里的 model 字符串：字符串表中整串替换为新名，
+          #      短的部分补 NUL——fdt 总长与所有 offset 不变，合法且安全；
+          #      新名字节数必须 ≤ 原名，否则显式报错（请缩短 Model，或改用
+          #      full 模式——Customize.sh 改 DTS 无此限制）
+          if [ -z "$MODEL_DTS" ]; then
+            echo "[INFO] Device.yaml 未定义 Model_dts，跳过型号替换"
+          elif [ "$MODEL_DTS" = "$MODEL" ]; then
+            echo "[INFO] Model_dts 与 Model 相同，跳过型号替换"
+          else
+            echo "[INFO] 型号替换: \"$MODEL_DTS\" -> \"$MODEL\""
+            # ---- 1) sed DTS 源（保持源一致）----
+            # target/ 与 build_dir/ 两处都找：前者是 IB 自带的 DTS 源目录。
+            # grep -F 按字面匹配；找不到即报错，不做静默跳过。
+            MATCHED=$(grep -rl -F --include='*.dts' "$MODEL_DTS" target build_dir 2>/dev/null || true)
+            if [ -z "$MATCHED" ]; then
+              echo "::error::未在 ImageBuilder 中找到含 \"$MODEL_DTS\" 的 DTS 文件，型号替换无法进行"
+              exit 1
+            fi
+            # 转义 sed 替换对中的元字符，避免型号名里的 . * [ ] \ / & 被当正则
+            SED_FROM=$(printf '%s' "$MODEL_DTS" | sed 's/[][\\.*^$\/&]/\\&/g')
+            SED_TO=$(printf '%s' "$MODEL" | sed 's/[&\/]/\\&/g')
+            while IFS= read -r f; do
+              [ -n "$f" ] || continue
+              sed -i "s|$SED_FROM|$SED_TO|g" "$f"
+              echo "[OK] 已修改 DTS: $f"
+            done <<< "$MATCHED"
+
+            # ---- 2) 改 dtb 二进制的 model 字符串（注意：不删除任何 dtb）----
+            while IFS= read -r d; do
+              [ -n "$d" ] || continue
+              strings "$d" 2>/dev/null | grep -qF "$MODEL_DTS" || continue
+              python3 - "$d" "$MODEL_DTS" "$MODEL" <<'PYEOF'
+          import sys
+          path, old, new = sys.argv[1], sys.argv[2].encode(), sys.argv[3].encode()
+          data = open(path, "rb").read()
+          cnt = data.count(old)
+          if cnt == 0:
+              sys.exit(2)
+          if len(new) > len(old):
+              sys.exit(3)
+          data = data.replace(old, new + b"\x00" * (len(old) - len(new)))
+          open(path, "wb").write(data)
+          print("[OK] dtb 型号已替换（%d 处）: %s" % (cnt, path))
+          PYEOF
+              rc=$?
+              if [ "$rc" -eq 3 ]; then
+                echo "::error::新型号字节数长于原型号，dtb 内无法无损替换；请缩短 Model 或改用 full 模式: $d"
+                exit 1
+              elif [ "$rc" -ne 0 ]; then
+                echo "::error::dtb 型号字符串替换失败: $d (rc=$rc)"
+                exit 1
+              fi
+            done < <(find build_dir -name '*.dtb' -type f 2>/dev/null)
+          fi
+
+          if [ -n "$FILES_ABS" ]; then
+            echo "[INFO] FILES 源目录: $FILES_SRC"
+            echo "[INFO] FILES 传入路径（不含空格）: $FILES_ABS"
+            make image PROFILE="$PROFILE" PACKAGES="$PACKAGES_LIST" FILES="$FILES_ABS"
+          else
+            make image PROFILE="$PROFILE" PACKAGES="$PACKAGES_LIST"
+          fi
+
+          # ---- 校验：用户启用的包真的全部进了固件 ----
+          # PACKAGES_LIST 由 [3.3] 从 Packages.yaml 生成（见 packages_list.txt）。
+          # 若该文件因解析异常为空，make image 会照常构建「官方默认固件」并
+          # 返回成功——用户包一个都没装，却看不出任何报错。这里用上游自己
+          # 生成的 manifest（权威清单）逐个核对，把这种情况变成显式失败。
+          MANIFEST=$(find bin/targets -maxdepth 3 -type f -name '*.manifest' 2>/dev/null | head -1)
+          if [ -z "$MANIFEST" ]; then
+            echo "::error::未找到 *.manifest，无法校验用户软件包是否已装入固件"
+            exit 1
+          fi
+          echo "[INFO] 依据 manifest 校验用户包: $MANIFEST"
+          # manifest 每行形如 `包名 - 版本`（apk）或 `包名 - 版本`（ipk），
+          # 取第一列比对。
+          MANI_NAMES=$(awk '{print $1}' "$MANIFEST" | sort -u)
+          miss=0
+          want=0
+          for p in $PACKAGES_LIST; do
+            [ -n "$p" ] || continue
+            want=$((want + 1))
+            if printf '%s\n' "$MANI_NAMES" | grep -qxF "$p"; then
+              echo "[OK] 已装入固件: $p"
+            else
+              echo "::error::用户包未出现在固件 manifest 中: $p"
+              miss=$((miss + 1))
+            fi
+          done
+          if [ "$want" -eq 0 ]; then
+            echo "::error::PACKAGES 列表为空，固件很可能只含默认包（Packages.yaml 是否解析失败？）"
+            exit 1
+          fi
+          if [ "$miss" -ne 0 ]; then
+            echo "::error::$miss/$want 个用户包未装入固件"
+            exit 1
+          fi
+          echo "[OK] 用户软件包校验通过（$want/$want 已装入固件）"
+
+          # ---- 校验 dtb 型号替换确实生效 ----
+          # 替换若无声失败，固件照样构建成功、概览页型号却是旧的。
+          # 这里检查全部 dtb 产物，把「静默失效」变成「显式失败」。
+          if [ -n "$MODEL_DTS" ] && [ "$MODEL_DTS" != "$MODEL" ]; then
+            bad=0
+            while IFS= read -r d; do
+              [ -n "$d" ] || continue
+              if strings "$d" 2>/dev/null | grep -qF "$MODEL_DTS"; then
+                echo "::error::dtb 仍含旧型号: $d"
+                bad=1
+              fi
+            done < <(find build_dir -name '*.dtb' -type f 2>/dev/null)
+            if [ "$bad" -ne 0 ]; then
+              echo "::error::DTS 型号替换未生效（详见上方 dtb 清单）"
+              exit 1
+            fi
+            echo "[OK] dtb 型号校验通过（已无旧型号字符串）"
+          fi
+
+          # ---- 校验 FILES 覆盖确实生效（仅在使用 FILES 时）----
+          # 上游 file_copy 在 FILES 为空或目录不存在时静默跳过，构建照样「成功」，
+          # 只是覆盖文件悄悄失效。这里回到构建出来的 rootfs 里确认文件已落地，
+          # 把「静默失效」变成「显式失败」。
+          # 路径依据（已按 v25.12.2 核实）：rules.mk 中
+          #   TARGET_DIR := $(TARGET_ROOTFS_DIR)/root-$(BOARD)
+          #   TARGET_ROOTFS_DIR ?= BUILD_DIR（默认），而 BUILD_DIR 位于 $(TOPDIR)/build_dir
+          # 因此形如 ib/build_dir/target-<目标>/root-<板级名>，maxdepth 留有余量。
+          if [ -n "$FILES_ABS" ]; then
+            ROOTFS_DIR=$(find build_dir -maxdepth 2 -type d -path 'build_dir/target-*/root-*' 2>/dev/null | head -1)
+            if [ -z "$ROOTFS_DIR" ]; then
+              # 上游目录结构若有变化，这里只警告不中断：宁可少一次校验，
+              # 也不要让纯校验步骤把已经成功的构建判成失败。
+              echo "[WARN] 未在 build_dir 下找到 rootfs 目录，跳过 FILES 生效校验"
+            else
+              echo "[INFO] 校验 FILES 生效情况（rootfs: $ROOTFS_DIR）"
+              missing=0
+              while IFS= read -r rel; do
+                [ -n "$rel" ] || continue
+                if [ -e "$ROOTFS_DIR/$rel" ]; then
+                  echo "[OK] FILES 已生效: /$rel"
+                else
+                  echo "::error::FILES 未生效，rootfs 中缺少: /$rel"
+                  missing=1
+                fi
+              done <<< "$(cd "$FILES_ABS" && find . -type f | sed 's|^\./||')"
+              if [ "$missing" -ne 0 ]; then
+                echo "::error::FILES 覆盖未生效（上游目录不存在时会静默跳过）"
+                exit 1
+              fi
+            fi
+          fi
+
+          echo "[OK] ImageBuilder 构建完成"
+          find bin/targets -type f | head -20
+
+      # ===========================================================
+      # 阶段 5: 上传固件
+      # ===========================================================
+
+      # ----------------------------------------------------------
+      # 5.1 整理固件
+      #
+      # 产出：
+      #   STAGE_DIR    暂存目录，存放重命名后的固件与配置文件，供 5.2-5.4 分类上传
+      #   BIN_DIR      整个 bin 输出目录，供 5.5 整体上传
+      #   ARTIFACT_DIR 本平台产物目录，仅用于打印清单与健全性校验
+      # ----------------------------------------------------------
+      - name: "[5.1] 整理固件"
+        id: organize
+        # 注意：条件里含 !cancelled()，它不是状态检查函数，但 GitHub 规定
+        # 「条件的顶层只要出现任一状态检查函数（success()/failure()/
+        # cancelled()/always()），就不再自动附加隐式 success()」。因此上一
+        # 阶段失败时本步骤不会被自动跳过，必须显式写明 success()，否则
+        # [IB.1] 失败后这里仍会执行，再报一个找不到 bin 目录的误导性错误。
+        if: ${{ !cancelled() && success() }}
+        run: |
+          MODEL="${{ steps.device.outputs.model }}"
+          VERSION="${{ steps.version.outputs.tag }}"
+          VERSION_RAW="${VERSION#v}"
+          # 设备标识：去掉空格，仅用于 Artifact 名称（下载的 zip 文件名不带空格）
+          # 固件文件名保留型号原有空格（Cudy TR3000-...）
+          DEVICE_ID=$(echo "$MODEL" | tr -d ' ' | tr -cd 'A-Za-z0-9._-')
+          # 构建号：本工作流从不执行 make，取 ImageBuilder 的
+          # include/version.mk 里的 REVISION——注意不能取 VERSION_CODE：
+          # 上游模板里 VERSION_CODE 是 `$(call qstrip,$(CONFIG_VERSION_CODE))`
+          # 这样的 make 表达式（含 $、括号、逗号），直接塞进文件名会得到
+          # 非法名称；而 REVISION 在打包时被
+          # `$(SED) 's,^# REVISION:=.*,REVISION:=$(REVISION),g'` 替换成真实
+          # 字面值（形如 r38135-0c4cd0f9920a），可直接用于文件名。
+          # 已按 ImmortalWrt v25.12.2 的 target/imagebuilder/Makefile 核实。
+          # 取不到时兜底用版本标签，避免出现无意义的 "unknown"。
+          BUILD_ID=""
+          if [ -f ib/include/version.mk ]; then
+            BUILD_ID=$(sed -n 's/^REVISION:=//p' ib/include/version.mk | head -1 | tr -d '[:space:]')
+          fi
+          # 兜底校验：文件名里不能出现 / $ ( ) , 空格与引号
+          BUILD_ID=$(printf '%s' "$BUILD_ID" | tr -cd 'A-Za-z0-9._+-')
+          if [ -z "$BUILD_ID" ]; then
+            echo "[WARN] 未取到构建号，回退为版本标签: $VERSION"
+            BUILD_ID="$VERSION"
+          fi
+          echo "[INFO] 构建号: $BUILD_ID"
+          # 产物根目录：ImageBuilder 的 make image 输出在其自身 bin/ 下
+          BUILD_ROOT="ib"
+          BIN_ROOT="$BUILD_ROOT/bin"
+          # 编译时刻（YYYYMMDD-HHMM），时区由 job 的 env.TZ 决定（当前 Asia/Shanghai）
+          # 该前缀放在文件名最前，便于按编译先后排序
+          DATE_STR=$(date +%Y%m%d-%H%M)
+          STAGE_DIR="$GITHUB_WORKSPACE/firmware"
+          mkdir -p "$STAGE_DIR"
+
+          echo "=========================================="
+          echo "  查找固件文件"
+          echo "=========================================="
+
+          # 从 TARGET 配置提取平台信息
+          # CONFIG_TARGET_mediatek_filogic_DEVICE_xxx -> mediatek/filogic
+          DEVICE_TARGET="${{ steps.device.outputs.target }}"
+          if [ -n "$DEVICE_TARGET" ]; then
+            # 提取 TARGET_mediatek_filogic 部分
+            TARGET_PART=$(echo "$DEVICE_TARGET" | sed 's/CONFIG_TARGET_//' | sed 's/_DEVICE_.*//')
+            # 将下划线转换为斜杠: mediatek_filogic -> mediatek/filogic
+            PLATFORM_PATH=$(echo "$TARGET_PART" | sed 's/_/\//g')
+            ARTIFACT_DIR="$BIN_ROOT/targets/${PLATFORM_PATH}"
+            echo "[INFO] 从 TARGET 推断产物目录: ${ARTIFACT_DIR}"
+          else
+            ARTIFACT_DIR=""
+            echo "[WARN] 未设置 TARGET，将搜索整个 targets 目录"
+          fi
+
+          # 查找固件文件
+          if [ -n "$ARTIFACT_DIR" ] && [ -d "$ARTIFACT_DIR" ]; then
+            # 精确查找指定目录
+            FW_FILES=$(find "$ARTIFACT_DIR" -maxdepth 1 -type f \( -name "*.itb" -o -name "*.bin" -o -name "*.img.gz" -o -name "*.squashfs" \) 2>/dev/null | grep -E "(sysupgrade|recovery|factory)" || true)
+          else
+            # 搜索整个 targets 目录
+            FW_FILES=$(find $BIN_ROOT/targets -type f \( -name "*.itb" -o -name "*.bin" -o -name "*.img.gz" -o -name "*.squashfs" \) 2>/dev/null | grep -E "(sysupgrade|recovery|factory)" || true)
+            if [ -z "$FW_FILES" ]; then
+              # 回退：用第一个 sysupgrade 产物推断目录
+              ARTIFACT_DIR=$(dirname "$(find $BIN_ROOT/targets -type f -name "*sysupgrade*" 2>/dev/null | head -1)" 2>/dev/null || true)
+              echo "[WARN] 回退推断产物目录: ${ARTIFACT_DIR}"
+            fi
+          fi
+
+          if [ -z "$FW_FILES" ]; then
+            echo "[ERROR] 未找到固件文件"
+            echo "期望目录: ${ARTIFACT_DIR}"
+            echo "目录结构:"
+            find $BIN_ROOT/targets -type f 2>/dev/null | head -20
+            exit 1
+          fi
+
+          echo "$FW_FILES" | while read -r file; do
+            [ -z "$file" ] && continue
+            base=$(basename "$file")
+            ext="${base##*.}"
+            case "$base" in
+              *squashfs-sysupgrade*) suffix="squashfs-sysupgrade" ;;
+              *squashfs-factory*)    suffix="squashfs-factory" ;;
+              *initramfs-recovery*)  suffix="initramfs-recovery" ;;
+              *sysupgrade*)          suffix="sysupgrade" ;;
+              *recovery*)            suffix="recovery" ;;
+              *factory*)             suffix="factory" ;;
+              *) suffix="${base%.*}" ;;
+            esac
+            # 命名规则：编译时间在最前（YYYYMMDD-HHMM，便于排序），
+            #           设备型号保留原有空格
+            new_name="${DATE_STR}-${MODEL}-ImmortalWrt-V${VERSION_RAW}-${BUILD_ID}-${suffix}.${ext}"
+            cp "$file" "$STAGE_DIR/$new_name"
+            echo "[FILE] $base -> $new_name"
+          done
+          echo "[OK] 共处理 $(printf '%s\n' "$FW_FILES" | grep -c . || true) 个固件"
+
+          # 复制配置文件（编译时间在最前，与固件命名规则保持一致）
+          # 该文件由 [3.3] 生成（immortalwrt/.config，见该步骤说明）。
+          # 加存在性判断是为了给出明确提示，而不是以 cp 报错收场。
+          if [ -f immortalwrt/.config ]; then
+            CP_NAME="${DATE_STR}-${MODEL}-ImmortalWrt-V${VERSION_RAW}-${BUILD_ID}-config.config"
+            cp immortalwrt/.config "$STAGE_DIR/$CP_NAME"
+            echo "[FILE] .config -> $CP_NAME"
+          else
+            echo "[WARN] 未找到 immortalwrt/.config，跳过配置文件上传"
+          fi
+
+          # 本平台产物目录：仅用于打印清单与健全性校验
+          if [ -n "$ARTIFACT_DIR" ] && [ -d "$ARTIFACT_DIR" ]; then
+            echo "[OK] 本平台产物目录: ${ARTIFACT_DIR}"
+            echo "产物清单:"
+            find "$ARTIFACT_DIR" -maxdepth 1 -type f | sed 's|^|  |' | head -40
+            # 包后缀不写死：v25.12.x 是 .apk，v24.10.x 是 .ipk（见 [IB.2] 说明）
+            echo "安装包数量 (*.apk/*.ipk): $(find "$ARTIFACT_DIR/packages" -type f \( -name '*.apk' -o -name '*.ipk' \) 2>/dev/null | wc -l)"
+          else
+            echo "[WARN] 本平台产物目录不存在，跳过清单打印: ${ARTIFACT_DIR}"
+          fi
+
+          # 整个 bin 输出目录：供 5.5 整体上传，必须存在
+          if [ -d "$BIN_ROOT" ]; then
+            echo "[OK] bin 输出目录: $BIN_ROOT"
+            echo "bin 顶层内容:"
+            ls -1 "$BIN_ROOT" | sed 's|^|  |'
+            echo "bin 文件总数: $(find "$BIN_ROOT" -type f 2>/dev/null | wc -l)"
+            echo "bin 总体积: $(du -sh "$BIN_ROOT" 2>/dev/null | cut -f1)"
+          else
+            echo "[ERROR] bin 输出目录不存在，无法上传完整产物: $BIN_ROOT"
+            exit 1
+          fi
+
+          echo ""
+          echo "[OK] 固件整理完成"
+          echo "=========================================="
+
+          echo "FIRMWARE=$STAGE_DIR" >> $GITHUB_ENV
+          echo "BIN_DIR=$BIN_ROOT" >> $GITHUB_ENV
+          echo "ARTIFACT_DIR=$ARTIFACT_DIR" >> $GITHUB_ENV
+          echo "device_id=${DEVICE_ID}" >> $GITHUB_OUTPUT
+          # 供 5.2-5.5 的 Artifact 名称使用，与固件文件名前缀保持一致
+          echo "date_str=${DATE_STR}" >> $GITHUB_OUTPUT
+          echo "status=success" >> $GITHUB_OUTPUT
+
+      # ----------------------------------------------------------
+      # 5.2 上传固件 (sysupgrade)
+      # ----------------------------------------------------------
+      - name: "[5.2] 上传固件 (sysupgrade)"
+        uses: actions/upload-artifact@v4
+        if: ${{ steps.organize.outputs.status == 'success' && !cancelled() }}
+        with:
+          name: "${{ steps.organize.outputs.date_str }}-ImmortalWrt-${{ steps.organize.outputs.device_id }}-${{ steps.version.outputs.tag }}-sysupgrade"
+          path: ${{ env.FIRMWARE }}/*sysupgrade*
+          if-no-files-found: error
+          retention-days: 90
+
+      # ----------------------------------------------------------
+      # 5.3 上传固件 (recovery/factory)
+      #
+      # 注意：路径通配不使用 *{a,b}* 花括号展开，改用多行写法，语义更明确。
+      # 部分设备没有 recovery/factory 产物，故用 warn 而不是 error。
+      # ----------------------------------------------------------
+      - name: "[5.3] 上传固件 (recovery/factory)"
+        uses: actions/upload-artifact@v4
+        if: ${{ steps.organize.outputs.status == 'success' && !cancelled() }}
+        with:
+          name: "${{ steps.organize.outputs.date_str }}-ImmortalWrt-${{ steps.organize.outputs.device_id }}-${{ steps.version.outputs.tag }}-recovery"
+          path: |
+            ${{ env.FIRMWARE }}/*recovery*
+            ${{ env.FIRMWARE }}/*factory*
+          if-no-files-found: warn
+          retention-days: 90
+
+      # ----------------------------------------------------------
+      # 5.4 上传配置文件
+      # ----------------------------------------------------------
+      - name: "[5.4] 上传配置文件"
+        uses: actions/upload-artifact@v4
+        if: ${{ steps.organize.outputs.status == 'success' && !cancelled() }}
+        with:
+          name: "${{ steps.organize.outputs.date_str }}-ImmortalWrt-${{ steps.organize.outputs.device_id }}-${{ steps.version.outputs.tag }}-config"
+          path: ${{ env.FIRMWARE }}/*.config
+          if-no-files-found: error
+          retention-days: 90
+
+      # ----------------------------------------------------------
+      # 5.5 上传完整编译产物
+      #
+      # 上传的是整个 bin 输出目录（immortalwrt/bin/）内的全部内容，
+      # 而不是暂存目录里重命名过的那几个文件。包含：
+      #   bin/targets/<平台>/   固件镜像、内核、设备树、
+      #                         profiles.json、sha256sums、*.manifest
+      #   bin/packages/<架构>/  编译出的全部安装包（.apk 或 .ipk，按版本而定）
+      # 注意：upload-artifact 默认跳过隐藏文件，这里显式包含。
+      #       该参数需要 actions/upload-artifact v4.4.0+，@v4 已满足；
+      #       若报 "Unexpected input(s) 'include-hidden-files'"，说明 runner
+      #       用的 v4 版本过旧，可去掉该参数或改为显式列出文件。
+      # ----------------------------------------------------------
+      - name: "[5.5] 上传完整编译产物"
+        uses: actions/upload-artifact@v4
+        if: ${{ steps.organize.outputs.status == 'success' && !cancelled() }}
+        with:
+          name: "${{ steps.organize.outputs.date_str }}-ImmortalWrt-${{ steps.organize.outputs.device_id }}-${{ steps.version.outputs.tag }}-full"
+          path: ${{ env.BIN_DIR }}/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 90
+
+      # 说明：此前这里还有 [5.6] 裁剪构建树 与 [5.7] 保存构建树缓存两步。
+      # 构建树缓存（build_dir + staging_dir，裁剪后仍有 10.24GB）已整体移除：
+      #   - 体积超过 GitHub 每仓库 10GB 配额，会把 ccache 与 dl 一起挤掉
+      #   - 保存一次要 6.5 分钟；而它的裁剪步骤用 `-name 'core.*'` 误删了
+      #     内核源码中的 core.h（include/net/netns/core.h），使下一次
+      #     full 编译恢复缓存后必然报 "net/netns/core.h: No such file"。
+      # full 模式现在每次从零编译，不再依赖构建树缓存；加速由 ccache 承担。
