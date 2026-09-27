@@ -152,7 +152,6 @@ jobs:
 
           echo "device_dir=${DEVICE_DIR}" >> $GITHUB_OUTPUT
           echo "model=${DEVICE_MODEL}" >> $GITHUB_OUTPUT
-          echo "model_dts=${MODEL_DTS}" >> $GITHUB_OUTPUT
           echo "target=${DEVICE_TARGET}" >> $GITHUB_OUTPUT
           echo "platform=${PLATFORM_SLUG}" >> $GITHUB_OUTPUT
 
@@ -181,7 +180,6 @@ jobs:
           echo "=========================================="
 
           sudo apt-get update -y
-          sudo apt-get upgrade -y
 
           sudo apt-get install -y --no-install-recommends \
             ack antlr3 asciidoc autoconf automake autopoint binutils bison \
@@ -337,15 +335,11 @@ jobs:
           echo "=========================================="
 
           # 创建初始配置：写入设备 TARGET
-          # （immortalwrt 是 [2.4] 克隆源码后建立的符号链接，此处防御性 mkdir）
+          # （immortalwrt 是 [2.4] 克隆源码后建立的符号链接，此处防御性 mkdir；
+          #   DEVICE_TARGET 的非空校验已在 [1.3] 完成，这里无需再判）
           mkdir -p immortalwrt
-          if [ -n "$DEVICE_TARGET" ]; then
-            echo "$DEVICE_TARGET" > immortalwrt/.config
-            echo "[OK] 设置设备 TARGET: $DEVICE_TARGET"
-          else
-            echo "[WARN] 未设置设备 TARGET，使用默认配置"
-            touch immortalwrt/.config
-          fi
+          echo "$DEVICE_TARGET" > immortalwrt/.config
+          echo "[OK] 设置设备 TARGET: $DEVICE_TARGET"
 
           # 解析 Device.yaml 中的软件包列表（enable / disable / disable_components）
           # 条目过滤只认 "  - 名称" 形式，避免段间注释或结构变化被误收为包名
@@ -488,9 +482,14 @@ jobs:
 
       # ----------------------------------------------------------
       # 3.4 恢复 ccache 缓存
+      #
+      # 注意条件含 !inputs.skip_compile：skip_compile 时不编译，缓存里只会
+      # 产生空目录；而 actions/cache 在主键完全命中后不再保存，空缓存一旦
+      # 占住主键，后续正常构建只会恢复空缓存且永远无法更新（缓存加速永久
+      # 失效）。因此调试模式必须整体跳过缓存的恢复与保存。
       # ----------------------------------------------------------
       - name: "[3.4] 恢复 ccache 缓存"
-        if: ${{ inputs.cache_enabled }}
+        if: ${{ inputs.cache_enabled && !inputs.skip_compile }}
         uses: actions/cache@v4
         with:
           path: immortalwrt/.ccache
@@ -499,7 +498,7 @@ jobs:
             ccache-${{ runner.os }}-${{ steps.device.outputs.platform }}-
 
       - name: "[3.5] 恢复源码下载缓存 (dl)"
-        if: ${{ inputs.cache_enabled }}
+        if: ${{ inputs.cache_enabled && !inputs.skip_compile }}
         uses: actions/cache@v4
         with:
           path: immortalwrt/dl
@@ -531,11 +530,11 @@ jobs:
       #       会被恢复出来的旧缓存覆盖。
       # ----------------------------------------------------------
       - name: "[3.5.1] 配置 ccache 校验方式"
-        if: ${{ inputs.cache_enabled }}
+        if: ${{ inputs.cache_enabled && !inputs.skip_compile }}
         run: |
           mkdir -p immortalwrt/.ccache
           cat > immortalwrt/.ccache/ccache.conf <<'EOF'
-          # 本文件由 AutoBuild.yml 的 [3.5.1] 每次运行重写，确保设置生效
+          # 本文件由 FullBuild.yml 的 [3.5.1] 每次运行重写，确保设置生效
           # 以编译器内容而非 mtime 校验：CI 每次重建工具链，mtime 必然变化
           compiler_check = content
           # 依赖模式：从依赖文件推导实际用到的头文件，提速并提高命中率
@@ -723,7 +722,7 @@ jobs:
           VERSION_RAW="${VERSION#v}"
           # 设备标识：去掉空格，仅用于 Artifact 名称（下载的 zip 文件名不带空格）
           # 固件文件名保留型号原有空格（Cudy TR3000-...）
-          DEVICE_ID=$(echo "$MODEL" | tr -d ' ' | tr -cd 'A-Za-z0-9._-')
+          DEVICE_ID=$(printf '%s' "$MODEL" | tr -cd 'A-Za-z0-9._-')
           # 构建号：源码树根目录的 version 文件（由 make 生成）。
           # 取不到时兜底用版本标签，避免出现无意义的 "unknown"。
           BUILD_ID=""
@@ -750,20 +749,13 @@ jobs:
           echo "  查找固件文件"
           echo "=========================================="
 
-          # 从 TARGET 配置提取平台信息
+          # 从 TARGET 配置提取平台信息（非空校验已在 [1.3] 完成）
           # CONFIG_TARGET_mediatek_filogic_DEVICE_xxx -> mediatek/filogic
           DEVICE_TARGET="${{ steps.device.outputs.target }}"
-          if [ -n "$DEVICE_TARGET" ]; then
-            # 提取 TARGET_mediatek_filogic 部分
-            TARGET_PART=$(echo "$DEVICE_TARGET" | sed 's/CONFIG_TARGET_//' | sed 's/_DEVICE_.*//')
-            # 将下划线转换为斜杠: mediatek_filogic -> mediatek/filogic
-            PLATFORM_PATH=$(echo "$TARGET_PART" | sed 's/_/\//g')
-            ARTIFACT_DIR="$BIN_ROOT/targets/${PLATFORM_PATH}"
-            echo "[INFO] 从 TARGET 推断产物目录: ${ARTIFACT_DIR}"
-          else
-            ARTIFACT_DIR=""
-            echo "[WARN] 未设置 TARGET，将搜索整个 targets 目录"
-          fi
+          TARGET_PART=$(echo "$DEVICE_TARGET" | sed 's/CONFIG_TARGET_//' | sed 's/_DEVICE_.*//')
+          PLATFORM_PATH=$(echo "$TARGET_PART" | sed 's/_/\//g')
+          ARTIFACT_DIR="$BIN_ROOT/targets/${PLATFORM_PATH}"
+          echo "[INFO] 从 TARGET 推断产物目录: ${ARTIFACT_DIR}"
 
           # 查找固件文件
           if [ -n "$ARTIFACT_DIR" ] && [ -d "$ARTIFACT_DIR" ]; then
@@ -809,15 +801,10 @@ jobs:
           echo "[OK] 共处理 $(printf '%s\n' "$FW_FILES" | grep -c . || true) 个固件"
 
           # 复制配置文件（编译时间在最前，与固件命名规则保持一致）
-          # 该文件由 [3.3] 生成。加存在性判断是为了在 [3.3] 行为变化时
-          # 给出明确提示，而不是以 cp 报错收场。
-          if [ -f immortalwrt/.config ]; then
-            CP_NAME="${DATE_STR}-${MODEL}-ImmortalWrt-V${VERSION_RAW}-${BUILD_ID}-config.config"
-            cp immortalwrt/.config "$STAGE_DIR/$CP_NAME"
-            echo "[FILE] .config -> $CP_NAME"
-          else
-            echo "[WARN] 未找到 immortalwrt/.config，跳过配置文件上传"
-          fi
+          # 该文件由 [3.3] 生成，此处必存在（[5.4] 上传时 if-no-files-found 为 error）
+          CP_NAME="${DATE_STR}-${MODEL}-ImmortalWrt-V${VERSION_RAW}-${BUILD_ID}-config.config"
+          cp immortalwrt/.config "$STAGE_DIR/$CP_NAME"
+          echo "[FILE] .config -> $CP_NAME"
 
           # 本平台产物目录：仅用于打印清单与健全性校验
           if [ -n "$ARTIFACT_DIR" ] && [ -d "$ARTIFACT_DIR" ]; then
@@ -849,7 +836,6 @@ jobs:
 
           echo "FIRMWARE=$STAGE_DIR" >> $GITHUB_ENV
           echo "BIN_DIR=$BIN_ROOT" >> $GITHUB_ENV
-          echo "ARTIFACT_DIR=$ARTIFACT_DIR" >> $GITHUB_ENV
           echo "device_id=${DEVICE_ID}" >> $GITHUB_OUTPUT
           # 供 5.2-5.5 的 Artifact 名称使用，与固件文件名前缀保持一致
           echo "date_str=${DATE_STR}" >> $GITHUB_OUTPUT
