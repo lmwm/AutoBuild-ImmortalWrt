@@ -1,15 +1,26 @@
 #!/bin/bash
 #
-# Cudy TR3000 自定义软件包
-# 此脚本在 feeds install 之后、make defconfig 之前执行
-# 由 AutoBuild.yml 的 [3.1] 步骤调用
+# Cudy TR3000 构建脚本（外部软件包 + 设备定制）
 #
-# 用法：在 immortalwrt 源码根目录下执行
+# 执行时机（均在源码树/SDK 根目录下执行）：
+#   FullBuild.yml    [3.1]：feeds install 之后、make defconfig 之前，完整执行
+#   ImageBuilder.yml [IB.2]：SDK 内 feeds install 之后执行（外部包段有效；
+#                     设备定制段的目标文件在 SDK 中不存在，自动跳过）
+#
+# 段落约定（顺序即执行顺序）：
+#   1) 外部软件包：git clone 到 package/app/，必要时对外部包打补丁
+#   2) 设备定制：改 DTS、内核配置等（仅 FullBuild 源码树中生效）
+#
+# 历史：本文件由原 Packages.sh 与 Customize.sh 合并而来（两段各取其一）。
 #
 
 set -e
 
 OPENWRT_DIR="$(pwd)"
+
+# ============================================================
+# 1) 外部软件包（克隆到 package/app/）
+# ============================================================
 
 # -----------------------------------------------------------
 # luci-theme-argon (最新版)
@@ -48,11 +59,33 @@ OPENWRT_DIR="$(pwd)"
 # -----------------------------------------------------------
 
 # -----------------------------------------------------------
-
-# -----------------------------------------------------------
 # luci-app-harbor-file
 # 克隆到 package/app/
 # -----------------------------------------------------------
-#git clone --depth 1 #https://github.com/destan19/luci-app-harbor-file.git \
+#git clone --depth 1 https://github.com/destan19/luci-app-harbor-file.git \
 #    "$OPENWRT_DIR/package/app/luci-app-harbor-file"
 #echo "[OK] 已添加: luci-app-harbor-file"
+
+# ============================================================
+# 2) 设备定制（DTS、内核配置等）
+# ============================================================
+
+# -----------------------------------------------------------
+# 修改设备型号名称
+# -----------------------------------------------------------
+DTS_FILE="target/linux/mediatek/dts/mt7981b-cudy-tr3000-v1-ubootmod.dts"
+
+if [ -f "$DTS_FILE" ]; then
+    sed -i 's/Cudy TR3000 v1 (OpenWrt U-Boot layout)/Cudy TR3000/g' "$DTS_FILE"
+    echo "[OK] 设备型号已修改: Cudy TR3000 v1 (OpenWrt U-Boot layout) -> Cudy TR3000"
+else
+    echo "[WARN] DTS 文件不存在: $DTS_FILE，跳过型号修改（ImageBuilder/SDK 中属正常）"
+fi
+
+# -----------------------------------------------------------
+# 其他设备定制（按需添加）
+# -----------------------------------------------------------
+# 示例：修改默认 IP
+# sed -i 's/192.168.1.1/192.168.50.1/g' package/base-files/files/bin/config_generate
+
+echo "[OK] Build.sh 执行完成"

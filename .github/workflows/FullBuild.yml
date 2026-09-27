@@ -7,9 +7,8 @@
 #
 # 通过 device 参数选择设备
 # 设备参数从 Devices/<设备名>/Device.yaml 读取
-# 自定义包从 Devices/<设备名>/Packages.yaml 读取
-# 自定义包脚本 Devices/<设备名>/Packages.sh
-# 设备定制从 Devices/<设备名>/Customize.sh 执行
+# 自定义包与设备参数统一从 Devices/<设备名>/Device.yaml 读取
+# 外部包克隆与设备定制由 Devices/<设备名>/Build.sh 执行
 # 版本标签为下拉选择，选项由「同步版本标签」（SyncVersions.yml）工作流定期维护
 #
 
@@ -130,7 +129,6 @@ jobs:
           # 注意：grep '^Model:' 不会误匹配 '^Model_dts:'（要求 Model 后紧跟冒号）
           DEVICE_MODEL=$(grep '^Model:' "$CONF" | sed 's/^Model: *//' | tr -d '"' | tr -d "'")
           MODEL_DTS=$(grep '^Model_dts:' "$CONF" | sed 's/^Model_dts: *//' | tr -d '"' | tr -d "'")
-          PACKAGES_LIST=$(grep '^Packages_list:' "$CONF" | sed 's/^Packages_list: *//' | tr -d '"' | tr -d "'")
           DEVICE_TARGET=$(grep '^Target:' "$CONF" | sed 's/^Target: *//' | tr -d '"' | tr -d "'")
 
           if [ -z "$DEVICE_MODEL" ] || [ -z "$DEVICE_TARGET" ]; then
@@ -155,7 +153,6 @@ jobs:
           echo "device_dir=${DEVICE_DIR}" >> $GITHUB_OUTPUT
           echo "model=${DEVICE_MODEL}" >> $GITHUB_OUTPUT
           echo "model_dts=${MODEL_DTS}" >> $GITHUB_OUTPUT
-          echo "packages_list=${PACKAGES_LIST}" >> $GITHUB_OUTPUT
           echo "target=${DEVICE_TARGET}" >> $GITHUB_OUTPUT
           echo "platform=${PLATFORM_SLUG}" >> $GITHUB_OUTPUT
 
@@ -166,7 +163,6 @@ jobs:
           echo "  设备目录: ${DEVICE_DIR}"
           echo "  型号: ${DEVICE_MODEL}"
           echo "  DTS 原始型号: ${MODEL_DTS:-（未设置）}"
-          echo "  包列表: ${PACKAGES_LIST}"
           echo "  平台: ${PLATFORM_SLUG}"
           echo "  TARGET: ${DEVICE_TARGET}"
           echo "=========================================="
@@ -313,29 +309,19 @@ jobs:
       # ===========================================================
 
       # ----------------------------------------------------------
-      # 3.1 添加自定义软件包（git clone 等）
+      # 3.1 执行 Build.sh（外部软件包克隆 + 设备定制）
+      #
+      # 原 [3.1] Packages.sh 与 [3.2] Customize.sh 两个脚本已合并为
+      # Devices/<设备名>/Build.sh（两段内容各取其一，见脚本内段落注释）。
       # ----------------------------------------------------------
-      - name: "[3.1] 添加自定义软件包"
+      - name: "[3.1] 执行 Build.sh（外部包 + 设备定制）"
         run: |
           DEVICE_DIR="${{ steps.device.outputs.device_dir }}"
-          if [ -f "${DEVICE_DIR}/Packages.sh" ]; then
-            chmod +x "${DEVICE_DIR}/Packages.sh"
-            cd immortalwrt && bash "${GITHUB_WORKSPACE}/${DEVICE_DIR}/Packages.sh"
+          if [ -f "${DEVICE_DIR}/Build.sh" ]; then
+            chmod +x "${DEVICE_DIR}/Build.sh"
+            cd immortalwrt && bash "${GITHUB_WORKSPACE}/${DEVICE_DIR}/Build.sh"
           else
-            echo "[INFO] 无 Packages.sh，跳过"
-          fi
-
-      # ----------------------------------------------------------
-      # 3.2 设备定制
-      # ----------------------------------------------------------
-      - name: "[3.2] 设备定制"
-        run: |
-          DEVICE_DIR="${{ steps.device.outputs.device_dir }}"
-          if [ -f "${DEVICE_DIR}/Customize.sh" ]; then
-            chmod +x "${DEVICE_DIR}/Customize.sh"
-            cd immortalwrt && bash "${GITHUB_WORKSPACE}/${DEVICE_DIR}/Customize.sh"
-          else
-            echo "[INFO] 无设备定制脚本，跳过"
+            echo "[INFO] 无 Build.sh，跳过"
           fi
 
       # ----------------------------------------------------------
@@ -344,7 +330,6 @@ jobs:
       - name: "[3.3] 生成编译配置"
         run: |
           DEVICE_DIR="${{ steps.device.outputs.device_dir }}"
-          PACKAGES_LIST="${{ steps.device.outputs.packages_list }}"
           DEVICE_TARGET="${{ steps.device.outputs.target }}"
 
           echo "=========================================="
@@ -362,9 +347,10 @@ jobs:
             touch immortalwrt/.config
           fi
 
-          # 如果存在 Packages.yaml，解析启用和禁用的包
-          if [ -n "$PACKAGES_LIST" ] && [ -f "${DEVICE_DIR}/${PACKAGES_LIST}" ]; then
-            PACKAGES_FILE="${DEVICE_DIR}/${PACKAGES_LIST}"
+          # 解析 Device.yaml 中的软件包列表（enable / disable / disable_components）
+          # 条目过滤只认 "  - 名称" 形式，避免段间注释或结构变化被误收为包名
+          PACKAGES_FILE="${DEVICE_DIR}/Device.yaml"
+          if [ -f "$PACKAGES_FILE" ]; then
 
             # 解析启用的包
             echo ""
@@ -381,8 +367,8 @@ jobs:
                 in_enable=false
                 continue
               fi
-              # 处理 enable 段落的包
-              if [ "$in_enable" = true ]; then
+              # 处理 enable 段落的包（只认 "- " 列表行）
+              if [ "$in_enable" = true ] && echo "$line" | grep -qE '^[[:space:]]*- '; then
                 pkg=$(echo "$line" | sed 's/^[[:space:]]*- //' | sed 's/#.*//' | xargs)
                 if [ -n "$pkg" ]; then
                   echo "CONFIG_PACKAGE_${pkg}=y" >> immortalwrt/.config
@@ -406,8 +392,8 @@ jobs:
                 in_disable=false
                 continue
               fi
-              # 处理 disable 段落的包
-              if [ "$in_disable" = true ]; then
+              # 处理 disable 段落的包（只认 "- " 列表行）
+              if [ "$in_disable" = true ] && echo "$line" | grep -qE '^[[:space:]]*- '; then
                 pkg=$(echo "$line" | sed 's/^[[:space:]]*- //' | sed 's/#.*//' | xargs)
                 if [ -n "$pkg" ]; then
                   echo "# CONFIG_PACKAGE_${pkg} is not set" >> immortalwrt/.config
@@ -438,8 +424,8 @@ jobs:
                 current_pkg=""
                 continue
               fi
-              # 处理子组件
-              if [ "$in_components" = true ] && [ -n "$current_pkg" ]; then
+              # 处理子组件（只认 "- " 列表行）
+              if [ "$in_components" = true ] && [ -n "$current_pkg" ] && echo "$line" | grep -qE '^[[:space:]]*- '; then
                 component=$(echo "$line" | sed 's/^[[:space:]]*- //' | sed 's/#.*//' | xargs)
                 if [ -n "$component" ]; then
                   echo "# CONFIG_PACKAGE_${current_pkg}_${component} is not set" >> immortalwrt/.config

@@ -17,10 +17,8 @@
 │   └── SyncVersions.yml       # 版本标签同步工作流（定期维护下拉选项）
 ├── Devices/                   # 设备目录（每个设备一个文件夹）
 │   └── Cudy TR3000/           # 目录名与 device 下拉选项值完全一致（含空格）
-│       ├── Device.yaml        # 设备参数（型号、TARGET）
-│       ├── Packages.yaml      # 软件包配置（启用/禁用）
-│       ├── Packages.sh        # 自定义软件包脚本（克隆外部仓库）
-│       └── Customize.sh       # 设备定制脚本（修改 DTS 等）
+│       ├── Device.yaml        # 设备参数（型号、TARGET）+ 软件包列表（启用/禁用）
+│       └── Build.sh           # 构建脚本（外部包克隆 + 设备定制，如改 DTS）
 ├── README.md
 └── .gitignore
 ```
@@ -120,9 +118,8 @@
   [2.6] 安装 feeds
 
 阶段 3: 自定义固件
-  [3.1] 添加自定义软件包（Packages.sh）
-  [3.2] 设备定制（Customize.sh）
-  [3.3] 生成编译配置（Packages.yaml）
+  [3.1] 执行 Build.sh（外部包克隆 + 设备定制）
+  [3.3] 生成编译配置（Device.yaml 的包列表）
   [3.4] 恢复 ccache 缓存（可选）
   [3.5] 恢复源码下载缓存（可选）
   [3.5.1] 配置 ccache 校验方式（可选）
@@ -157,11 +154,11 @@
   [2.3] 确定版本标签（解析 + 校验）
 
 阶段 3: 生成编译配置
-  [3.3] 生成编译配置（Packages.yaml -> packages_list.txt 供 [IB.3] 使用）
+  [3.3] 生成编译配置（Device.yaml -> packages_list.txt 供 [IB.3] 使用）
 
 阶段 IB: ImageBuilder 快速构建
   [IB.1] 下载 ImageBuilder 与 SDK（与 tag 严格对应）
-  [IB.2] SDK 编译第三方包（范围由 Packages.sh 决定，未克隆则跳过）
+  [IB.2] SDK 编译第三方包（范围由 Build.sh 决定，未克隆则跳过）
   [IB.3] 组装固件（make image，设备信息用 FILES= 覆盖）
 
 阶段 5: 上传固件
@@ -186,14 +183,14 @@
 不编译内核/工具链，而是复用官方预编译产物（与 `tag` 严格对应，保证包 ABI 一致）：
 
 1. **[IB.1]** 下载 `immortalwrt-imagebuilder-<版本>-mediatek-filogic` 与对应 SDK
-2. **[IB.2]** 用 SDK 编译 `Packages.sh` 实际克隆的第三方包（多为 `PKGARCH:=all` 的脚本/主题包，不涉及内核 ABI），产出安装包放入 ImageBuilder 的 `packages/`。安装包后缀按版本而定（v25.12.x 为 `.apk`，v24.10.x 为 `.ipk`，上游按 `PACKAGE_SUFFIX := $(if $(CONFIG_USE_APK),apk,ipk)` 动态判定），工作流不写死后缀；若某个包未产出安装包会显式报错，不再静默漏装
-3. **[IB.3]** `make image PROFILE=... PACKAGES="..." [FILES="..."]` 组装固件，`PACKAGES` 列表由 `[3.3]` 从 `Packages.yaml` 生成；`make image` **之前**修改 IB 内 DTS 源的 `model` 属性（现场编译 dtb，型号改名在 dtb 层生效，见下文「设备型号」），`FILES=` 为可选的用户态文件覆盖
+2. **[IB.2]** 用 SDK 编译 `Build.sh` 实际克隆的第三方包（多为 `PKGARCH:=all` 的脚本/主题包，不涉及内核 ABI），产出安装包放入 ImageBuilder 的 `packages/`。安装包后缀按版本而定（v25.12.x 为 `.apk`，v24.10.x 为 `.ipk`，上游按 `PACKAGE_SUFFIX := $(if $(CONFIG_USE_APK),apk,ipk)` 动态判定），工作流不写死后缀；若某个包未产出安装包会显式报错，不再静默漏装
+3. **[IB.3]** `make image PROFILE=... PACKAGES="..." [FILES="..."]` 组装固件，`PACKAGES` 列表由 `[3.3]` 从 `Device.yaml` 生成；`make image` **之前**修改 IB 内 DTS 源的 `model` 属性（现场编译 dtb，型号改名在 dtb 层生效，见下文「设备型号」），`FILES=` 为可选的用户态文件覆盖
 
 > **`FILES=` 是可选项**：`Devices/<设备>/files` 目录不存在时 `[IB.3]` 直接跳过用户态文件覆盖，不报错。使用时**路径不能含空格。** 设备目录名（如 `Cudy TR3000`）含空格，而上游 `include/rules.mk` 的 `file_copy` 里是未加引号的 `$(CP) $(1) $(2)`（`CP:=cp -fpR`），路径会被 shell 拆成两个参数，报两条 `cp: cannot stat` 并让 `prepare_rootfs` 失败（2026-09-25 实测）。因此 `[IB.3]` 先把 `Devices/<设备>/files` 复制到不含空格的中转目录 `$RUNNER_TEMP/ib-files`，再把该路径传给 `FILES=`。`make image` 完成后还会回到 rootfs 逐个核对文件是否落地——上游 `if [ -d '$(2)' ]` 在目录缺失时静默跳过，这一步把「覆盖悄悄失效」变成显式失败。
 
-> **[IB.2] 的编译范围由 `Packages.sh` 决定，不在工作流里硬编码包名。** 它比对 `Packages.sh` 执行前后 `package/` 下 Makefile 的差集来识别新增的包（只认含 `BuildPackage` 或 `include package.mk`/`luci.mk` 的 Makefile，因此不会误抓仓库附带的纯工具 Makefile），包名优先取 `PKG_NAME:=`、缺失时回退为目录名。
+> **[IB.2] 的编译范围由 `Build.sh` 决定，不在工作流里硬编码包名。** 它比对 `Build.sh` 执行前后 `package/` 下 Makefile 的差集来识别新增的包（只认含 `BuildPackage` 或 `include package.mk`/`luci.mk` 的 Makefile，因此不会误抓仓库附带的纯工具 Makefile），包名优先取 `PKG_NAME:=`、缺失时回退为目录名。
 >
-> 若 `Packages.sh` 未克隆任何包（例如克隆语句被注释），该步骤直接跳过，对应软件包由 `[IB.3]` 从官方源安装——**此时需保证 `Packages.yaml` 里启用的包在官方源中存在**，否则 `make image` 会因找不到包而失败。增删第三方包只需改 `Devices/<设备>/` 下的配置，不必再动工作流。
+> 若 `Build.sh` 未克隆任何包（例如克隆语句被注释），该步骤直接跳过，对应软件包由 `[IB.3]` 从官方源安装——**此时需保证 `Device.yaml` 里启用的包在官方源中存在**，否则 `make image` 会因找不到包而失败。增删第三方包只需改 `Devices/<设备>/` 下的配置，不必再动工作流。
 
 ### 设备型号（两个工作流）
 
@@ -216,7 +213,7 @@ dtb 的 model 属性
 
 | 工作流 | 做法 |
 |------|------|
-| `FullBuild.yml`（full） | `Customize.sh` 修改源码树 `target/linux/mediatek/dts/<设备>.dts` 的 `model`，编译时生成 dtb |
+| `FullBuild.yml`（full） | `Build.sh` 的设备定制段修改源码树 `target/linux/mediatek/dts/<设备>.dts` 的 `model`，编译时生成 dtb |
 | `ImageBuilder.yml`（imagebuilder） | `[IB.3]` 在 `make image` 前把新型号写进 IB 内**预编译的 dtb**（直接改 dtb 二进制的 model 字符串：整串替换 + 短名补 NUL，fdt 总长与 offset 不变），并同步 sed DTS 源保持一致。新名字节数须 ≤ 原名，否则报错请改用 `FullBuild.yml` |
 
 型号字符串由 `Device.yaml` 的 `Model_dts`（DTS 原始值）与 `Model`（目标值）提供，
@@ -229,8 +226,8 @@ dtb 的 model 属性
 - 若目标 tag 尚未发布官方 ImageBuilder，`[IB.1]` 会报错退出，此时改用 `FullBuild.yml`
 - 内核模块类第三方包（`kmod-xxx`）需与官方内核 ABI 严格匹配；当前配置已移除 `kmod-oaf`，若将来加回请自行评估
 - **`[IB.1]` 要求归档唯一命中**：同一目录若出现多个 ImageBuilder 或 SDK 归档（多宿主架构、多 gcc 版本等），会列出候选并报错退出，不会静默取第一个；下载后还会做一次归档完整性校验，避免下载被截断后在解压阶段才暴露
-- **`[IB.2]` 会核对第三方包产物**：按版本实际后缀收集（`.apk` 或 `.ipk`），并逐个确认 `Packages.sh` 克隆的每个包都产出了安装包；若有包缺失（make 未报错但产物为空）则显式失败，不会静默漏装
-- **`[IB.3]` 会核对用户包已装入固件**：`make image` 后用上游生成的 `*.manifest` 逐个比对 `Packages.yaml` 里启用的包；若 `packages_list.txt` 异常为空导致只构建出默认固件，会显式失败，不会静默产出缺包的固件
+- **`[IB.2]` 会核对第三方包产物**：按版本实际后缀收集（`.apk` 或 `.ipk`），并逐个确认 `Build.sh` 克隆的每个包都产出了安装包；若有包缺失（make 未报错但产物为空）则显式失败，不会静默漏装
+- **`[IB.3]` 会核对用户包已装入固件**：`make image` 后用上游生成的 `*.manifest` 逐个比对 `Device.yaml` 里启用的包；若 `packages_list.txt` 异常为空导致只构建出默认固件，会显式失败，不会静默产出缺包的固件
 
 ### ruby YJIT 开关（`ruby_yjit`，仅 FullBuild.yml）
 
@@ -247,27 +244,24 @@ OpenClash 只用 ruby 跑订阅规则转换等一次性短脚本，JIT 加速没
 
 ### Device.yaml
 
-设备配置文件，定义设备的基本参数（键名首字母大写）：
+设备目录下的唯一配置文件，分两部分：设备参数（键名首字母大写）与软件包列表（见下节）：
 
 ```yaml
 # 设备型号（用于固件命名与 Artifact 命名）
 Model: "Cudy TR3000"
 
 # DTS 中的原始型号名（dtb model 属性）
-# imagebuilder 工作流在 make image 前把它替换为 Model；full 工作流由 Customize.sh 处理
+# ImageBuilder 工作流在 make image 前把它替换为 Model；FullBuild 由 Build.sh 的设备定制段处理
 # 可选；缺失或与 Model 相同则跳过型号替换
 Model_dts: "Cudy TR3000 v1 (OpenWrt U-Boot layout)"
-
-# 自定义软件包列表文件
-Packages_list: "Packages.yaml"
 
 # 设备 TARGET（用于 make defconfig）
 Target: "CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-v1-ubootmod=y"
 ```
 
-### Packages.yaml
+### 软件包列表（写在 Device.yaml 末尾）
 
-软件包配置文件，管理启用和禁用的包：
+管理启用和禁用的包。**结构约定**（`[3.3]` 解析依赖，勿改动）：包列表段放文件最后、顺序为 `enable` → `disable` → `disable_components`，段内条目一律 `  - 名称` 形式（解析只认 `- ` 列表行，注释行会被跳过）：
 
 ```yaml
 # 启用的包
@@ -313,9 +307,14 @@ disable_components:
 > （只有 `zh_Hans`），官方构建不生成它的语言包，启用必报
 > `no such package` 失败（2026-09-26 实测）。
 
-### Packages.sh
+### Build.sh
 
-克隆外部仓库的脚本（从 GitHub 获取最新版本），并对外部包打必要补丁：
+设备目录下的唯一脚本，两段内容（顺序即执行顺序）：
+
+1. **外部软件包**：从 GitHub 克隆最新版本到 `package/app/`，并对外部包打必要补丁
+2. **设备定制**：修改 DTS、内核配置等（目标文件带 `if [ -f ]` 防护，不存在时跳过）
+
+`FullBuild.yml` 的 `[3.1]` 在源码树中完整执行；`ImageBuilder.yml` 的 `[IB.2]` 在 SDK 中执行（设备定制段因目标文件不存在自动跳过，不影响第三方包识别）：
 
 ```bash
 #!/bin/bash
@@ -323,16 +322,22 @@ set -e
 
 OPENWRT_DIR="$(pwd)"
 
-# 删除 feeds 旧版本，克隆到 package/app/
+# ---- 1) 外部软件包：删除 feeds 旧版本，克隆到 package/app/ ----
 find "$OPENWRT_DIR/package/feeds/" -name "luci-app-openclash" -exec rm -rf {} + 2>/dev/null
 git clone --depth 1 https://github.com/vernesong/OpenClash.git \
     "$OPENWRT_DIR/package/app/OpenClash"
 echo "[OK] 已添加: OpenClash"
+
+# ---- 2) 设备定制：修改设备型号名称 ----
+DTS_FILE="target/linux/mediatek/dts/mt7981b-cudy-tr3000-v1-ubootmod.dts"
+if [ -f "$DTS_FILE" ]; then
+    sed -i 's/Cudy TR3000 v1 (OpenWrt U-Boot layout)/Cudy TR3000/g' "$DTS_FILE"
+fi
 ```
 
-#### OpenAppFilter 内核模块补丁
+#### OpenAppFilter 内核模块补丁（历史案例）
 
-`Packages.sh` 除了克隆 [OpenAppFilter](https://github.com/destan19/OpenAppFilter)，还会修补其 `oaf/Makefile`。
+`Build.sh`（原 `Packages.sh`）除了克隆 [OpenAppFilter](https://github.com/destan19/OpenAppFilter)，还会修补其 `oaf/Makefile`。
 
 该仓库提供三个包，三者都启用才能工作：
 
@@ -342,7 +347,7 @@ echo "[OK] 已添加: OpenClash"
 | `appfilter` | `oafd` 用户态服务程序 | `libubox`、`libuci`、`libjson-c` 等 |
 | `kmod-oaf` | oaf 内核模块 | `kmod-ipt-conntrack` |
 
-因此 `Packages.yaml` 中只需写 `luci-app-oaf`，`make defconfig` 会自动通过依赖链选中另外两个。
+因此 `Device.yaml` 中只需写 `luci-app-oaf`，`make defconfig` 会自动通过依赖链选中另外两个。
 
 **为什么需要补丁**：OpenWrt/ImmortalWrt 25.12 起内核为 6.12，编译时把 `-Wstrict-prototypes` 等告警视为错误，而 `oaf/src/k_json.c` 存在大量 `cJSON *func()` 形式的无原型声明，编译时直接报错：
 
@@ -363,21 +368,6 @@ KCFLAGS="$(KCFLAGS) -Wno-error=strict-prototypes"
 
 > 注意：这仅是**编译期**修复。上游该模块在新内核上另有运行时风险（issue #372：6.12 内核下 `memcpy` 缓冲区溢出可触发内核 panic），是否长期启用请自行评估。
 
-### Customize.sh
-
-设备定制脚本（修改 DTS、内核配置等）：
-
-```bash
-#!/bin/bash
-set -e
-
-# 修改设备型号名称
-DTS_FILE="target/linux/mediatek/dts/mt7981b-cudy-tr3000-v1-ubootmod.dts"
-if [ -f "$DTS_FILE" ]; then
-    sed -i 's/Cudy TR3000 v1 (OpenWrt U-Boot layout)/Cudy TR3000/g' "$DTS_FILE"
-fi
-```
-
 ## 添加新设备
 
 以 `NanoPi R4S` 为例：
@@ -394,17 +384,15 @@ mkdir -p "Devices/NanoPi R4S"
 
 ### 2. 创建 Device.yaml
 
+设备参数与软件包列表写在同一文件：
+
 ```yaml
 Model: "NanoPi R4S"
 # 可选：DTS 中的原始型号名（ImageBuilder 工作流替换为 Model 用，无需改型号就不写）
 # Model_dts: "..."
-Packages_list: "Packages.yaml"
 Target: "CONFIG_TARGET_rockchip_armv8_DEVICE_friendlyarm_nanopi-r4s=y"
-```
 
-### 3. 创建 Packages.yaml
-
-```yaml
+# 软件包列表（写在同一文件末尾）
 enable:
   - luci-i18n-base-zh-cn
   - luci-i18n-mwan3-zh-cn
@@ -415,30 +403,27 @@ disable:
   - luci-app-passwall
 ```
 
-### 4. 编写 Packages.sh（可选）
+### 3. 编写 Build.sh（可选）
+
+需要克隆外部包或做设备定制时才写，两段合一：
 
 ```bash
 #!/bin/bash
 set -e
 OPENWRT_DIR="$(pwd)"
 
+# 1) 外部包
 git clone --depth 1 https://github.com/vernesong/OpenClash.git \
     "$OPENWRT_DIR/package/app/OpenClash"
-```
 
-### 5. 编写 Customize.sh（可选）
-
-```bash
-#!/bin/bash
-set -e
-
+# 2) 设备定制
 DTS_FILE="target/linux/rockchip/dts/rk3399-nanopi-r4s.dts"
 if [ -f "$DTS_FILE" ]; then
     sed -i 's/FriendlyARM NanoPi R4S/NanoPi R4S/g' "$DTS_FILE"
 fi
 ```
 
-### 6. 注册设备
+### 4. 注册设备
 
 编辑 `.github/workflows/FullBuild.yml` 与 `.github/workflows/ImageBuilder.yml`，分别在 `device` 的 `options` 中添加：
 

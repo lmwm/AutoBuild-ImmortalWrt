@@ -8,8 +8,8 @@
 #
 # 通过 device 参数选择设备
 # 设备参数从 Devices/<设备名>/Device.yaml 读取
-# 软件包列表从 Devices/<设备名>/Packages.yaml 读取
-# 第三方包由 Devices/<设备名>/Packages.sh 克隆并在 SDK 中编译
+# 设备参数与软件包列表统一从 Devices/<设备名>/Device.yaml 读取
+# 外部包克隆与设备定制由 Devices/<设备名>/Build.sh 执行（在 SDK 中跑外部包段）
 # 步骤编号沿用合并时期的编号（[1.x]/[2.x]/[3.3]/[IB.x]/[5.x]），
 # 便于对照 FullBuild.yml 与文档/排查记录中的步骤锚点
 # 版本标签为下拉选择，选项由「同步版本标签」（SyncVersions.yml）工作流定期维护
@@ -120,7 +120,6 @@ jobs:
           # 注意：grep '^Model:' 不会误匹配 '^Model_dts:'（要求 Model 后紧跟冒号）
           DEVICE_MODEL=$(grep '^Model:' "$CONF" | sed 's/^Model: *//' | tr -d '"' | tr -d "'")
           MODEL_DTS=$(grep '^Model_dts:' "$CONF" | sed 's/^Model_dts: *//' | tr -d '"' | tr -d "'")
-          PACKAGES_LIST=$(grep '^Packages_list:' "$CONF" | sed 's/^Packages_list: *//' | tr -d '"' | tr -d "'")
           DEVICE_TARGET=$(grep '^Target:' "$CONF" | sed 's/^Target: *//' | tr -d '"' | tr -d "'")
 
           if [ -z "$DEVICE_MODEL" ] || [ -z "$DEVICE_TARGET" ]; then
@@ -145,7 +144,6 @@ jobs:
           echo "device_dir=${DEVICE_DIR}" >> $GITHUB_OUTPUT
           echo "model=${DEVICE_MODEL}" >> $GITHUB_OUTPUT
           echo "model_dts=${MODEL_DTS}" >> $GITHUB_OUTPUT
-          echo "packages_list=${PACKAGES_LIST}" >> $GITHUB_OUTPUT
           echo "target=${DEVICE_TARGET}" >> $GITHUB_OUTPUT
           echo "platform=${PLATFORM_SLUG}" >> $GITHUB_OUTPUT
 
@@ -156,7 +154,6 @@ jobs:
           echo "  设备目录: ${DEVICE_DIR}"
           echo "  型号: ${DEVICE_MODEL}"
           echo "  DTS 原始型号: ${MODEL_DTS:-（未设置）}"
-          echo "  包列表: ${PACKAGES_LIST}"
           echo "  平台: ${PLATFORM_SLUG}"
           echo "  TARGET: ${DEVICE_TARGET}"
           echo "=========================================="
@@ -275,7 +272,6 @@ jobs:
       - name: "[3.3] 生成编译配置"
         run: |
           DEVICE_DIR="${{ steps.device.outputs.device_dir }}"
-          PACKAGES_LIST="${{ steps.device.outputs.packages_list }}"
           DEVICE_TARGET="${{ steps.device.outputs.target }}"
 
           echo "=========================================="
@@ -294,9 +290,10 @@ jobs:
             touch immortalwrt/.config
           fi
 
-          # 如果存在 Packages.yaml，解析启用和禁用的包
-          if [ -n "$PACKAGES_LIST" ] && [ -f "${DEVICE_DIR}/${PACKAGES_LIST}" ]; then
-            PACKAGES_FILE="${DEVICE_DIR}/${PACKAGES_LIST}"
+          # 解析 Device.yaml 中的软件包列表（enable / disable / disable_components）
+          # 条目过滤只认 "  - 名称" 形式，避免段间注释或结构变化被误收为包名
+          PACKAGES_FILE="${DEVICE_DIR}/Device.yaml"
+          if [ -f "$PACKAGES_FILE" ]; then
 
             # 解析启用的包
             echo ""
@@ -313,8 +310,8 @@ jobs:
                 in_enable=false
                 continue
               fi
-              # 处理 enable 段落的包
-              if [ "$in_enable" = true ]; then
+              # 处理 enable 段落的包（只认 "- " 列表行）
+              if [ "$in_enable" = true ] && echo "$line" | grep -qE '^[[:space:]]*- '; then
                 pkg=$(echo "$line" | sed 's/^[[:space:]]*- //' | sed 's/#.*//' | xargs)
                 if [ -n "$pkg" ]; then
                   echo "CONFIG_PACKAGE_${pkg}=y" >> immortalwrt/.config
@@ -338,8 +335,8 @@ jobs:
                 in_disable=false
                 continue
               fi
-              # 处理 disable 段落的包
-              if [ "$in_disable" = true ]; then
+              # 处理 disable 段落的包（只认 "- " 列表行）
+              if [ "$in_disable" = true ] && echo "$line" | grep -qE '^[[:space:]]*- '; then
                 pkg=$(echo "$line" | sed 's/^[[:space:]]*- //' | sed 's/#.*//' | xargs)
                 if [ -n "$pkg" ]; then
                   echo "# CONFIG_PACKAGE_${pkg} is not set" >> immortalwrt/.config
@@ -370,8 +367,8 @@ jobs:
                 current_pkg=""
                 continue
               fi
-              # 处理子组件
-              if [ "$in_components" = true ] && [ -n "$current_pkg" ]; then
+              # 处理子组件（只认 "- " 列表行）
+              if [ "$in_components" = true ] && [ -n "$current_pkg" ] && echo "$line" | grep -qE '^[[:space:]]*- '; then
                 component=$(echo "$line" | sed 's/^[[:space:]]*- //' | sed 's/#.*//' | xargs)
                 if [ -n "$component" ]; then
                   echo "# CONFIG_PACKAGE_${current_pkg}_${component} is not set" >> immortalwrt/.config
@@ -399,7 +396,7 @@ jobs:
       # 本工作流的主体。不编译内核/工具链，而是下载官方 ImageBuilder 与
       # SDK（与 tag 严格对应，保证包 ABI 一致）：
       #   [IB.1] 下载并解压 ImageBuilder 与 SDK
-      #   [IB.2] 用 SDK 编译 Packages.sh 实际克隆的第三方包（多为
+      #   [IB.2] 用 SDK 编译 Build.sh 实际克隆的第三方包（多为
       #          PKGARCH:=all 的脚本/主题包，无内核 ABI 问题），产出安装包
       #          （.apk 或 .ipk，按版本而定）放入 ImageBuilder 的 packages/；
       #          未克隆任何包时整步跳过
@@ -511,13 +508,15 @@ jobs:
       # ----------------------------------------------------------
       # IB.2 SDK 编译第三方包
       #
-      # Packages.sh 依赖 $OPENWRT_DIR=pwd，SDK 的目录结构与源码树兼容，
+      # Build.sh 依赖 $OPENWRT_DIR=pwd，SDK 的目录结构与源码树兼容，
       # 可直接复用。第三方包多为 PKGARCH:=all（脚本/主题），不涉及内核 ABI。
+      # Build.sh 的「设备定制」段在 SDK 中因目标文件不存在而自动跳过
+      # （只输出 WARN），不影响本步骤的包识别。
       #
-      # 编译范围由 Packages.sh 决定，不在本文件硬编码包名：
-      # 此前这里写死四个包名，一旦 Packages.sh 里的克隆被注释掉，仍会执行
+      # 编译范围由 Build.sh 决定，不在本文件硬编码包名：
+      # 此前这里写死四个包名，一旦 Build.sh 里的克隆被注释掉，仍会执行
       # make package/<包>/compile 并报 build failed（2026-09-25 实测）。
-      # 现在改为「Packages.sh 克隆了什么就编译什么」，未克隆任何包时整步跳过，
+      # 现在改为「Build.sh 克隆了什么就编译什么」，未克隆任何包时整步跳过，
       # 由 [IB.3] 直接从官方源安装。以后增删第三方包只需改 Devices/ 下的配置。
       # ----------------------------------------------------------
       - name: "[IB.2] SDK 编译第三方包"
@@ -526,28 +525,28 @@ jobs:
           # 必须用绝对路径：本步骤随后 cd 到 sdk，相对路径 Devices/... 会
           # 变成 sdk/Devices/...，导致 cp 报 cannot stat 而失败。
           DEVICE_ABS="$GITHUB_WORKSPACE/$DEVICE_DIR"
-          if [ ! -f "$DEVICE_ABS/Packages.sh" ]; then
-            echo "::error::未找到 $DEVICE_ABS/Packages.sh"
+          if [ ! -f "$DEVICE_ABS/Build.sh" ]; then
+            echo "::error::未找到 $DEVICE_ABS/Build.sh"
             exit 1
           fi
           cd sdk
-          cp "$DEVICE_ABS/Packages.sh" .
+          cp "$DEVICE_ABS/Build.sh" .
 
-          # 顺序很重要：先 feeds update/install，再执行 Packages.sh，与 full 模式的
-          # [2.6] -> [3.1] 保持一致。Packages.sh 的职责是「先删掉 feeds 中的旧版本
+          # 顺序很重要：先 feeds update/install，再执行 Build.sh，与 FullBuild.yml 的
+          # [2.6] -> [3.1] 保持一致。Build.sh 外部包段的职责是「先删掉 feeds 中的旧版本
           # 符号链接，再克隆自定义版本」；若顺序颠倒，feeds install 会把
           # package/feeds/luci/luci-theme-argon 之类的链接重新装回来，既让
-          # Packages.sh 的删除动作落空，也让同名包出现两份定义。
-          # 附带好处：feeds install 会创建 package/feeds/，Packages.sh 里的
+          # Build.sh 的删除动作落空，也让同名包出现两份定义。
+          # 附带好处：feeds install 会创建 package/feeds/，Build.sh 里的
           # find 因此有目录可扫（SDK 初始状态并没有这个目录）。
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-          # ---- 识别 Packages.sh 实际克隆进来的包 ----
+          # ---- 识别 Build.sh 实际克隆进来的包 ----
           # 用「执行前后 package/ 下 Makefile 集合的差集」定位新增文件，
-          # 不依赖 Packages.sh 把包克隆到哪个目录，也不依赖包名约定。
+          # 不依赖 Build.sh 把包克隆到哪个目录，也不依赖包名约定。
           find package -name Makefile -type f 2>/dev/null | LC_ALL=C sort > /tmp/pkg_before.txt
-          bash Packages.sh
+          bash Build.sh
           find package -name Makefile -type f 2>/dev/null | LC_ALL=C sort > /tmp/pkg_after.txt
           NEW_MKS=$(comm -13 /tmp/pkg_before.txt /tmp/pkg_after.txt || true)
 
@@ -570,7 +569,7 @@ jobs:
           done <<< "$NEW_MKS"
 
           if [ -z "$PKG_TARGETS" ]; then
-            echo "[INFO] Packages.sh 未克隆任何第三方包，跳过 SDK 编译"
+            echo "[INFO] Build.sh 未克隆任何第三方包，跳过 SDK 编译"
             echo "[INFO] [IB.3] 将直接从官方软件源安装对应软件包"
             mkdir -p ../ib/packages
             exit 0
@@ -646,7 +645,7 @@ jobs:
       # ----------------------------------------------------------
       # IB.3 组装固件（make image）
       #
-      # PACKAGES 列表由 [3.3] 从 Packages.yaml 生成（packages_list.txt）。
+      # PACKAGES 列表由 [3.3] 从 Device.yaml 生成（packages_list.txt）。
       # 设备型号：make image 前修改 IB 内 DTS 源的 model 属性——make image
       #           会现场编译 dtb，型号在 dtb 层生效，全链路自动正确。
       # FILES=：可选，指向 Devices/<设备>/files，在运行时覆盖用户态文件。
@@ -716,7 +715,7 @@ jobs:
           #   2) 直接改 dtb 二进制里的 model 字符串：字符串表中整串替换为新名，
           #      短的部分补 NUL——fdt 总长与所有 offset 不变，合法且安全；
           #      新名字节数必须 ≤ 原名，否则显式报错（请缩短 Model，或改用
-          #      full 模式——Customize.sh 改 DTS 无此限制）
+          #      full 模式——Build.sh 的设备定制段改 DTS 无此限制）
           if [ -z "$MODEL_DTS" ]; then
             echo "[INFO] Device.yaml 未定义 Model_dts，跳过型号替换"
           elif [ "$MODEL_DTS" = "$MODEL" ]; then
@@ -777,7 +776,7 @@ jobs:
           fi
 
           # ---- 校验：用户启用的包真的全部进了固件 ----
-          # PACKAGES_LIST 由 [3.3] 从 Packages.yaml 生成（见 packages_list.txt）。
+          # PACKAGES_LIST 由 [3.3] 从 Device.yaml 生成（见 packages_list.txt）。
           # 若该文件因解析异常为空，make image 会照常构建「官方默认固件」并
           # 返回成功——用户包一个都没装，却看不出任何报错。这里用上游自己
           # 生成的 manifest（权威清单）逐个核对，把这种情况变成显式失败。
@@ -803,7 +802,7 @@ jobs:
             fi
           done
           if [ "$want" -eq 0 ]; then
-            echo "::error::PACKAGES 列表为空，固件很可能只含默认包（Packages.yaml 是否解析失败？）"
+            echo "::error::PACKAGES 列表为空，固件很可能只含默认包（Device.yaml 是否解析失败？）"
             exit 1
           fi
           if [ "$miss" -ne 0 ]; then
