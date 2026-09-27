@@ -51,6 +51,12 @@ enable:
   #（白名单只有 zh_Hans），官方构建不生成它的语言包。
 #  - luci-i18n-openclash-zh-cn
   - luci-i18n-argon-config-zh-cn
+  # 下面两个是 luci 默认集应用（luci-app-firewall / luci-app-package-manager）
+  # 的翻译包：full 模式的 defconfig 会按 luci.mk 的 DEFAULT:=LUCI_LANG_*
+  # 自动带上，ImageBuilder 的 apk 依赖解析则不会。显式列出保证两种模式
+  # 的固件语言一致（否则 ImageBuilder 固件里这两个页面是英文）。
+  - luci-i18n-firewall-zh-cn
+  - luci-i18n-package-manager-zh-cn
 
   # LuCI 主题
   - luci-theme-argon
@@ -74,6 +80,11 @@ enable:
 
   # 内核模块
   - kmod-mtd-rw
+  # 内核 TLS 卸载模块。kmod-bonding 的条件依赖
+  # （DEPENDS:=PACKAGE_kmod-tls:kmod-tls）在 ImageBuilder 的 apk 元数据里
+  # 会被当成无条件依赖自动拉入，full 模式的 Kconfig 解析则不会；
+  # 显式列出保证两种模式一致，也让 bonding 具备 TLS 卸载能力。
+  - kmod-tls
   - kmod-usb-net-cdc-ncm
   - kmod-usb-net-cdc-mbim
   - kmod-usb-net-cdc-ether
