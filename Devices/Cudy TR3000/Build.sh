@@ -19,35 +19,111 @@ set -e
 OPENWRT_DIR="$(pwd)"
 
 # ============================================================
-# 1) 外部软件包（克隆到 package/app/）
+# 1) 外部软件包（版本门控：比 feeds 新才替换，否则用源码自带）
+#
+# 门控规则（2026-09-28）：
+#   - 源码 feeds 没有该包              -> 克隆外部版本
+#   - 外部 PKG_VERSION 比 feeds 自带新  -> 删 feeds 链接后克隆替换
+#   - 版本相同或外部更旧                -> 不拉取不编译，直接用 feeds 自带
+#   - 任一侧版本无法提取                -> 无法证明相同，采用外部版本
+# 版本取自包 Makefile 的 PKG_VERSION（去引号与 v 前缀，sort -V 语义比较）。
+#
+# 本段在 feeds install 之后执行（FullBuild [3.1] / ImageBuilder [IB.2]），
+# package/feeds/ 下才有可扫的符号链接；全部走"用自带"时下游直接使用
+# feeds 版本，[IB.2] 的差集识别为空即跳过 SDK 编译。
 # ============================================================
 
-# -----------------------------------------------------------
-# luci-theme-argon (最新版)
-# 删除 feeds 旧版本，克隆到 package/app/
-# -----------------------------------------------------------
-#find "$OPENWRT_DIR/package/feeds/" -name "luci-theme-argon" -exec rm -rf {} + 2>/dev/null
-#git clone --depth 1 https://github.com/jerrykuku/luci-theme-argon.git \
-#    "$OPENWRT_DIR/package/app/luci-theme-argon"
-#echo "[OK] 已添加: luci-theme-argon"
+EXT_TMP_DIR="${TMPDIR:-/tmp}/ext-pkg-src"
+
+# 提取 Makefile 的 PKG_VERSION（归一化：去引号/空白、去 v 前缀）
+ext_pkg_version() {
+    sed -n 's/^[[:space:]]*PKG_VERSION[[:space:]]*:*=[[:space:]]*//p' "$1" 2>/dev/null \
+        | head -1 | tr -d ' "' | sed 's/^[vV]//' | tr -d '[:space:]'
+}
+
+# 定位包定义 Makefile（仓库根优先，其次一级子目录里含包定义的）
+ext_pkg_makefile() {
+    if grep -qE 'BuildPackage|/package\.mk|/luci\.mk' "$1/Makefile" 2>/dev/null; then
+        printf '%s\n' "$1/Makefile"
+        return 0
+    fi
+    find "$1" -mindepth 2 -maxdepth 2 -name Makefile -type f 2>/dev/null \
+        | while IFS= read -r mk; do
+            if grep -qE 'BuildPackage|/package\.mk|/luci\.mk' "$mk" 2>/dev/null; then
+                printf '%s\n' "$mk"
+                break
+            fi
+        done
+}
+
+# $1 是否比 $2 新（语义化版本比较；相等不算新）
+ext_ver_newer() {
+    [ -n "$1" ] && [ -n "$2" ] && [ "$1" != "$2" ] \
+        && [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | tail -1)" = "$1" ]
+}
+
+# add_or_keep <feeds 包名> <git URL> <目标目录名>
+add_or_keep() {
+    local name="$1" url="$2" dest="$3"
+    local feed_dir feed_mk feed_ver ext_mk ext_ver clone_dir
+
+    # feeds 自带版本（feeds install 创建的符号链接，目录名即包名）
+    feed_ver=""
+    feed_dir=$(find "$OPENWRT_DIR/package/feeds" -maxdepth 3 -type l -name "$name" 2>/dev/null | head -1)
+    if [ -n "$feed_dir" ]; then
+        feed_mk=$(ext_pkg_makefile "$feed_dir")
+        if [ -n "$feed_mk" ]; then
+            feed_ver=$(ext_pkg_version "$feed_mk")
+        fi
+    fi
+
+    clone_dir="$EXT_TMP_DIR/$dest"
+    rm -rf "$clone_dir"
+    if ! git clone --depth 1 "$url" "$clone_dir" >/dev/null 2>&1; then
+        echo "[WARN] 克隆失败: $url（保留源码自带: ${feed_ver:-无}）"
+        return 0
+    fi
+    ext_mk=$(ext_pkg_makefile "$clone_dir")
+    ext_ver=""
+    if [ -n "$ext_mk" ]; then
+        ext_ver=$(ext_pkg_version "$ext_mk")
+    fi
+
+    if [ -z "$feed_dir" ]; then
+        echo "[OK] $name: 源码不自带，采用外部版本 ${ext_ver:-未知}"
+    elif [ -z "$feed_ver" ] || [ -z "$ext_ver" ]; then
+        echo "[OK] $name: 版本无法比对（自带:${feed_ver:-?} 外部:${ext_ver:-?}），采用外部版本"
+    elif ext_ver_newer "$ext_ver" "$feed_ver"; then
+        echo "[OK] $name: 外部 $ext_ver 比源码自带 $feed_ver 新，替换"
+    else
+        echo "[INFO] $name: 外部 $ext_ver 不比源码自带 $feed_ver 新，直接用自带（跳过拉取编译）"
+        rm -rf "$clone_dir"
+        return 0
+    fi
+
+    # 采纳外部版本：删除 feeds 旧符号链接，移入 package/app/
+    find "$OPENWRT_DIR/package/feeds/" -name "$name" -exec rm -rf {} + 2>/dev/null || true
+    mkdir -p "$OPENWRT_DIR/package/app"
+    mv "$clone_dir" "$OPENWRT_DIR/package/app/$dest"
+    echo "[OK] 已添加: $dest ($name ${ext_ver:-未知})"
+}
+
+mkdir -p "$EXT_TMP_DIR"
 
 # -----------------------------------------------------------
-# luci-app-argon-config (配套)
-# 删除 feeds 旧版本，克隆到 package/app/
+# 各外部包（feeds 有同名包时按版本门控，无则直接克隆）
 # -----------------------------------------------------------
-#find "$OPENWRT_DIR/package/feeds/" -name "luci-app-argon-config" -exec rm -rf {} + 2>/dev/null
-#git clone --depth 1 https://github.com/jerrykuku/luci-app-argon-config.git \
-#    "$OPENWRT_DIR/package/app/luci-app-argon-config"
-#echo "[OK] 已添加: luci-app-argon-config"
+add_or_keep luci-theme-argon \
+    https://github.com/jerrykuku/luci-theme-argon.git luci-theme-argon
 
-# -----------------------------------------------------------
-# OpenClash
-# 删除 feeds 旧版本，克隆到 package/app/
-# -----------------------------------------------------------
-#find "$OPENWRT_DIR/package/feeds/" -name "luci-app-openclash" -exec rm -rf {} + 2>/dev/null
-#git clone --depth 1 https://github.com/vernesong/OpenClash.git \
-#    "$OPENWRT_DIR/package/app/OpenClash"
-#echo "[OK] 已添加: OpenClash (luci-app-openclash)"
+add_or_keep luci-app-argon-config \
+    https://github.com/jerrykuku/luci-app-argon-config.git luci-app-argon-config
+
+add_or_keep luci-app-openclash \
+    https://github.com/vernesong/OpenClash.git OpenClash
+
+add_or_keep luci-app-harbor-file \
+    https://github.com/destan19/luci-app-harbor-file.git luci-app-harbor-file
 
 # -----------------------------------------------------------
 # （已移除）OpenAppFilter
@@ -57,14 +133,6 @@ OPENWRT_DIR="$(pwd)"
 #       -Wstrict-prototypes 编译错误）。现已按需求移除 luci-app-oaf，
 #       克隆与补丁一并删除。
 # -----------------------------------------------------------
-
-# -----------------------------------------------------------
-# luci-app-harbor-file
-# 克隆到 package/app/
-# -----------------------------------------------------------
-#git clone --depth 1 https://github.com/destan19/luci-app-harbor-file.git \
-#    "$OPENWRT_DIR/package/app/luci-app-harbor-file"
-#echo "[OK] 已添加: luci-app-harbor-file"
 
 # ============================================================
 # 2) 设备定制（DTS、内核配置等）

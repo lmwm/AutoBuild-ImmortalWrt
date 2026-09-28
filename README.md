@@ -312,10 +312,14 @@ disable_components:
 
 设备目录下的唯一脚本，两段内容（顺序即执行顺序）：
 
-1. **外部软件包**：从 GitHub 克隆最新版本到 `package/app/`，并对外部包打必要补丁
+1. **外部软件包**：克隆 GitHub 版本到 `package/app/`，并对外部包打必要补丁。**带版本门控**——先比较外部与源码 feeds 自带的 `PKG_VERSION`：
+   - feeds 没有该包 → 克隆外部版本
+   - 外部版本**更新** → 删 feeds 链接后克隆替换
+   - 版本相同或外部更旧 → **不拉取不编译**，直接用 feeds 自带
+   - 任一侧版本无法提取 → 无法证明相同，采用外部版本
 2. **设备定制**：修改 DTS、内核配置等（目标文件带 `if [ -f ]` 防护，不存在时跳过）
 
-`FullBuild.yml` 的 `[3.1]` 在源码树中完整执行；`ImageBuilder.yml` 的 `[IB.2]` 在 SDK 中执行（设备定制段因目标文件不存在自动跳过，不影响第三方包识别）：
+`FullBuild.yml` 的 `[3.1]` 在源码树中完整执行；`ImageBuilder.yml` 的 `[IB.2]` 在 SDK 中执行（设备定制段因目标文件不存在自动跳过，不影响第三方包识别）。全部走"用自带"时 `[IB.2]` 的差集为空即跳过 SDK 编译，对应包由 `[IB.3]` 从官方源安装：
 
 ```bash
 #!/bin/bash
@@ -323,11 +327,12 @@ set -e
 
 OPENWRT_DIR="$(pwd)"
 
-# ---- 1) 外部软件包：删除 feeds 旧版本，克隆到 package/app/ ----
-find "$OPENWRT_DIR/package/feeds/" -name "luci-app-openclash" -exec rm -rf {} + 2>/dev/null
-git clone --depth 1 https://github.com/vernesong/OpenClash.git \
-    "$OPENWRT_DIR/package/app/OpenClash"
-echo "[OK] 已添加: OpenClash"
+# ---- 1) 外部软件包：版本门控（add_or_keep 定义见脚本）----
+# feeds 无此包 -> 克隆；外部更新 -> 替换；相同/更旧 -> 用自带
+add_or_keep luci-theme-argon \
+    https://github.com/jerrykuku/luci-theme-argon.git luci-theme-argon
+add_or_keep luci-app-openclash \
+    https://github.com/vernesong/OpenClash.git OpenClash
 
 # ---- 2) 设备定制：修改设备型号名称 ----
 DTS_FILE="target/linux/mediatek/dts/mt7981b-cudy-tr3000-v1-ubootmod.dts"
