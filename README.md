@@ -18,7 +18,10 @@
 ├── Devices/                   # 设备目录（每个设备一个文件夹）
 │   └── Cudy TR3000/           # 目录名与 device 下拉选项值完全一致（含空格）
 │       ├── Device.yaml        # 设备参数（型号、TARGET）+ 软件包列表（启用/禁用）
-│       └── Build.sh           # 构建脚本（外部包克隆 + 设备定制，如改 DTS）
+│       ├── Build.sh           # 构建脚本（外部包克隆 + 设备定制，如改 DTS）
+│       └── files/             # 用户态文件覆盖（与固件根目录一一对应）
+│           ├── etc/uci-defaults/99-cudy-tr3000-defaults  # 默认 lan IP、网口归属、Argon 本地壁纸
+│           └── www/luci-static/argon/img/bg1.jpg         # Argon 默认壁纸
 ├── README.md
 └── .gitignore
 ```
@@ -317,7 +320,14 @@ disable_components:
    - 外部版本**更新** → 删 feeds 链接后克隆替换
    - 版本相同或外部更旧 → **不拉取不编译**，直接用 feeds 自带
    - 任一侧版本无法提取 → 无法证明相同，采用外部版本
-2. **设备定制**：修改 DTS、内核配置等（目标文件带 `if [ -f ]` 防护，不存在时跳过）
+2. **设备定制**：合并 `files/` 用户态文件、修改 DTS、内核配置等（目标文件带 `if [ -f ]` 防护，不存在时跳过）
+
+`files/` 的内容与**固件根目录**一一对应，两个工作流的注入方式不同但结果一致：
+
+| 工作流 | 注入方式 |
+|--------|----------|
+| `FullBuild.yml` | `[3.1]` 的 Build.sh 把 `files/` 并进源码树 `package/base-files/files/`（base-files 的 `Package/install` 会 `cp ./files/*` 收集） |
+| `ImageBuilder.yml` | `[IB.3]` 用 `FILES=` 机制把同一个 `files/` 覆盖到 rootfs（不重编 base-files） |
 
 `FullBuild.yml` 的 `[3.1]` 在源码树中完整执行；`ImageBuilder.yml` 的 `[IB.2]` 在 SDK 中执行（设备定制段因目标文件不存在自动跳过，不影响第三方包识别）。全部走"用自带"时 `[IB.2]` 的差集为空即跳过 SDK 编译，对应包由 `[IB.3]` 从官方源安装：
 
@@ -334,12 +344,43 @@ add_or_keep luci-theme-argon \
 add_or_keep luci-app-openclash \
     https://github.com/vernesong/OpenClash.git OpenClash
 
-# ---- 2) 设备定制：修改设备型号名称 ----
+# ---- 2) 设备定制：合并用户态文件 + 修改设备型号名称 ----
+DEVICE_FILES="${DEVICE_FILES:-${GITHUB_WORKSPACE}/${DEVICE_DIR}/files}"
+if [ -d "$DEVICE_FILES" ]; then
+    cp -a "$DEVICE_FILES/." "$OPENWRT_DIR/package/base-files/files/"
+fi
+
 DTS_FILE="target/linux/mediatek/dts/mt7981b-cudy-tr3000-v1-ubootmod.dts"
 if [ -f "$DTS_FILE" ]; then
     sed -i 's/Cudy TR3000 v1 (OpenWrt U-Boot layout)/Cudy TR3000/g' "$DTS_FILE"
 fi
 ```
+
+#### 默认网络配置（lan IP 与网口归属）
+
+当前设备的默认项由 `Devices/Cudy TR3000/files/etc/uci-defaults/99-cudy-tr3000-defaults` 在**首次启动**时设置（uci-defaults 执行一次即删除）：
+
+| 项目 | 默认值 | 说明 |
+|------|--------|------|
+| lan 地址 | `10.0.0.1/8`（netmask `255.0.0.0`） | 首次启动时写入 `/etc/config/network` |
+| 网口归属 | `eth0`、`eth1` **都**属于 lan（`br-lan`） | 上游默认是 `lan=eth1`、`wan=eth0`；本固件把两个口都收进 lan，`wan` 不再占用物理口 |
+| wan 接口 | 保留但不绑定设备（`proto=none`） | 不删除 `network.wan`，因为 `/etc/config/firewall` 的 wan 区域引用它 |
+
+依据（已按 ImmortalWrt v25.12.2 核实）：上游 `target/linux/mediatek/filogic/base-files/etc/board.d/02_network` 对 `cudy,tr3000-v1-ubootmod` 的默认分配是 `ucidef_set_interfaces_lan_wan eth1 eth0`；`bin/config_generate` 对 lan 强制建 bridge 并生成 `network.@device[0]`（`br-lan`）。两个网口是直连 MAC/PHY（无 switch 芯片）：`eth0`=`gmac0`（外置 2.5G PHY）、`eth1`=`gmac1`（内置千兆 PHY）。
+
+> 用 uci-defaults 而不是改 `02_network`/`config_generate` 源码，是因为 **ImageBuilder 不重编 base-files**（它只解包官方预编译包，改源码树里的这两个文件不会进固件），而 `files/` 与 `FILES=` 两条注入路径对两个工作流都有效，配置只有一份。
+
+> DHCP 池未改动：`config_generate` 生成的 `dhcp.lan` 仍是起始 `100`、数量 `150`（即 `10.0.0.100` 起分配 150 个地址）。在 /8 网段下够用；要扩池在 LuCI 的 **网络 → 接口 → lan → DHCP 服务器**里改。
+
+#### Argon 主题默认壁纸
+
+默认壁纸文件是 `Devices/Cudy TR3000/files/www/luci-static/argon/img/bg1.jpg`（1920×1080），随 `files/` 覆盖到 `/www/luci-static/argon/img/bg1.jpg`：
+
+- **文件名保持 `.jpg`**：Argon 的默认背景路径写死在模板里（`media + "/img/bg1.jpg"`），主题自带的同名文件就是背景图，换图只能整份替换这个文件。
+- **文件内容可以是 PNG**：本仓库放的就是 PNG 原图（源图 `Wapper.png`，2.3 MB，**未做任何转码**）。浏览器按内容识别图片格式，`<img>` 能正常渲染；只是扩展名与内容不一致，对固件功能无影响。
+- 因此**整份替换同名文件**即可改默认壁纸，不需要改主题代码；`files/` 的注入晚于主题包解包，覆盖必然生效。
+- **必须同时关掉"在线壁纸"**：`luci-app-argon-config` 的 `/etc/config/argon` 默认带 `option online_wallpaper 'bing'`，而模板逻辑是「在线壁纸可用就用在线图，否则回落本地 `img/bg1.jpg`」。所以 `99-cudy-tr3000-defaults` 会把 `argon.@global[0].online_wallpaper` 设为 `none`（该脚本序号 99 晚于该包的 uci-defaults，能覆盖其默认值）。需要在线壁纸时在 LuCI 的 **Argon 主题设置**里改回即可。
+- 想缩小体积时可把该文件转成同尺寸 JPEG（体积约为 PNG 的 1/5，肉眼无差），源图 `Wapper.png` 保留在工作区根目录。
 
 #### OpenAppFilter 内核模块补丁（历史案例）
 

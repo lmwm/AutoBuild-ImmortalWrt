@@ -9,7 +9,7 @@
 #
 # 段落约定（顺序即执行顺序）：
 #   1) 外部软件包：git clone 到 package/app/，必要时对外部包打补丁
-#   2) 设备定制：改 DTS、内核配置等（仅 FullBuild 源码树中生效）
+#   2) 设备定制：合并 files/ 用户态文件、改 DTS、内核配置等（仅 FullBuild 源码树中生效）
 #
 # 历史：本文件由原 Packages.sh 与 Customize.sh 合并而来（两段各取其一）。
 #
@@ -135,8 +135,40 @@ add_or_keep luci-app-harbor-file \
 # -----------------------------------------------------------
 
 # ============================================================
-# 2) 设备定制（DTS、内核配置等）
+# 2) 设备定制（用户态文件覆盖、DTS、内核配置等）
 # ============================================================
+
+# -----------------------------------------------------------
+# 合并本设备的用户态文件（files/）
+#
+# 目录约定：Devices/<设备名>/files/ 的内容与固件根目录一一对应
+#   files/www/luci-static/argon/img/bg1.jpg  ->  /www/luci-static/argon/img/bg1.jpg
+#   files/etc/uci-defaults/99-xxx            ->  /etc/uci-defaults/99-xxx
+#
+# FullBuild 没有 FILES= 机制，只能把文件并进源码树的 base-files 包；
+# base-files 的 Package/install 用 `cp ./files/* $(1)/` 收集，因此放在这里
+# 与上游自带文件同等生效（已按 ImmortalWrt v25.12.2 的
+# package/base-files/Makefile 核实）。
+#
+# 作用域说明：只影响跟随源码树构建的 base-files（FullBuild）。
+# ImageBuilder 不重编 base-files，它走工作流 [IB.3] 的 FILES= 机制读同一个
+# files/ 目录，两条路径的最终内容一致。
+# -----------------------------------------------------------
+DEVICE_FILES="${DEVICE_FILES:-${GITHUB_WORKSPACE}/${DEVICE_DIR}/files}"
+
+if [ -d "$DEVICE_FILES" ]; then
+    BASE_FILES_DIR="$OPENWRT_DIR/package/base-files/files"
+    if [ -d "$BASE_FILES_DIR" ]; then
+        # 逐项 cp -a：files/ 里只放"整份替换"的文件，不删除上游自带内容
+        cp -a "$DEVICE_FILES/." "$BASE_FILES_DIR/"
+        echo "[OK] 已合并设备文件到 base-files: $DEVICE_FILES"
+        find "$DEVICE_FILES" -type f | sed "s|^$DEVICE_FILES/|  [FILE] /|"
+    else
+        echo "[WARN] 未找到 $BASE_FILES_DIR，跳过设备文件合并"
+    fi
+else
+    echo "[INFO] 无设备文件目录（$DEVICE_FILES），跳过用户态文件覆盖"
+fi
 
 # -----------------------------------------------------------
 # 修改设备型号名称
@@ -153,7 +185,8 @@ fi
 # -----------------------------------------------------------
 # 其他设备定制（按需添加）
 # -----------------------------------------------------------
-# 示例：修改默认 IP
-# sed -i 's/192.168.1.1/192.168.50.1/g' package/base-files/files/bin/config_generate
+# 默认 lan 口 IP 与网口归属不在这里改：两者都通过 files/etc/uci-defaults/
+# 99-cudy-tr3000-defaults 在首次启动时设置（FullBuild 与 ImageBuilder 一致），
+# 见上方"合并本设备的用户态文件"。
 
 echo "[OK] Build.sh 执行完成"

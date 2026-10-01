@@ -1,0 +1,79 @@
+#!/bin/sh
+#
+# Cudy TR3000 首次启动网络配置（uci-defaults：只在首次启动执行一次）
+#
+# 落盘方式：本文件位于 Devices/Cudy TR3000/files/ 下，
+#   FullBuild.yml    [3.1] 由 Build.sh 的设备定制段合并进源码树 package/base-files/files/
+#   ImageBuilder.yml [IB.3] 由 FILES= 机制覆盖到 rootfs
+# 两种模式都会在固件里生成 /etc/uci-defaults/99-cudy-tr3000-defaults，
+# 首次启动由 /etc/init.d/boot 执行，执行成功后文件被删除（不会重复运行）。
+#
+# 运行时机：晚于 preinit 的 board.d（02_network 生成 lan=eth1 / wan=eth0），
+# 因此这里可以直接覆盖生成出来的 /etc/config/network；且早于 network 服务启动。
+#
+# 内容依据（已按 ImmortalWrt v25.12.2 核实）：
+#   - bin/config_generate 对 lan 强制建 bridge，生成 network.@device[0]
+#     （name=br-lan，ports 来自 board.d 里 lan 的 device 列表）
+#   - target/linux/mediatek/filogic/base-files/etc/board.d/02_network 对
+#     cudy,tr3000-v1-ubootmod 的默认分配是 ucidef_set_interfaces_lan_wan eth1 eth0
+#     （即 lan=eth1、wan=eth0）
+#   - Cudy TR3000 两个网口是直连 MAC/PHY（无 switch 芯片）：
+#     eth0=gmac0（外置 2.5G PHY）、eth1=gmac1（内置千兆 PHY）
+#
+# 本脚本所做的三件事：
+#   1) eth0、eth1 都加入 lan（br-lan），wan 不再占用物理网口
+#   2) lan 默认地址改为 10.0.0.1/8（netmask 255.0.0.0）
+#   3) 关闭 Argon 的在线壁纸，使本地默认壁纸 img/bg1.jpg 生效
+#
+
+# ---- 1) 把两个物理网口都收进 lan ----
+# wan 的物理设备名从生成好的配置里读（默认 eth0），不写死，耐上游改动。
+# 若上游将来把两个口对调（lan=eth0 / wan=eth1），本脚本仍会把两个口都收进 lan。
+WAN_PORT=$(uci -q get network.wan.device)
+
+# log 用：把原始分配记录下来，便于日后排查
+logger -t cudy-tr3000-defaults "原 lan 口: $(uci -q get network.lan.device) / 原 wan 口: ${WAN_PORT:-无}"
+
+# lan 的 bridge 设备段：config_generate 对 lan 强制建 bridge，正常就是 @device[0]
+# （name=br-lan）。这里做一次名字校验，上游若改了生成顺序也不会改错对象。
+LAN_DEV_NAME=$(uci -q get network.@device[0].name)
+if [ "$LAN_DEV_NAME" != "br-lan" ]; then
+    logger -t cudy-tr3000-defaults "network.@device[0] 不是 br-lan（实际: ${LAN_DEV_NAME:-空}），跳过网口归并"
+else
+    uci -q delete network.@device[0].ports
+    uci add_list network.@device[0].ports='eth1'
+    [ -n "$WAN_PORT" ] && uci add_list network.@device[0].ports="$WAN_PORT"
+fi
+
+# wan 不再占用物理口：保留接口本身（无 device、proto=none），日后需要时可手动指回
+# 某个口。不删除 network.wan，是因为 /etc/config/firewall 的 wan 区域仍引用它。
+uci -q delete network.wan.device
+uci set network.wan.proto='none'
+
+# ---- 2) 默认 lan 口 IP：10.0.0.1/8 ----
+uci set network.lan.proto='static'
+uci set network.lan.ipaddr='10.0.0.1'
+uci set network.lan.netmask='255.0.0.0'
+
+# 如需指定上游 DNS（不设则由 wan/dhcp 提供；本固件默认无 wan 口，建议按需取消注释）：
+# uci add_list network.lan.dns='223.5.5.5'
+
+uci commit network
+
+# 说明：此处不做 /etc/init.d/network reload。uci-defaults 在 network 服务启动
+# 之前执行，上面的 uci 改动会被随后的正常启动直接采用；主动 reload 反而可能
+# 在启动早期制造短暂中断。
+
+# ---- 3) 让 Argon 使用本地默认壁纸（img/bg1.jpg）----
+# 依据：luci-app-argon-config 的 /etc/config/argon 默认带
+#   option online_wallpaper 'bing'
+# 而主题登录页模板 sysauth.ut 的逻辑是「在线壁纸可用就用在线图，否则回落到
+#   media + "/img/bg1.jpg"」。因此必须把在线壁纸关掉（none），本地壁纸才会生效。
+# 本文件序号 99 大于该包的 uci-defaults，执行顺序在后；若 argon 包未启用
+# （没有 /etc/config/argon），uci 会直接失败，用 || true 忽略。
+uci -q set argon.@global[0].online_wallpaper='none' || true
+uci -q commit argon || true
+# 清掉可能已缓存的在线壁纸地址（缓存文件在 /var，重启即消失，这里只作兜底）
+rm -f /var/run/argon_bing.url /var/run/argon_unsplash.url 2>/dev/null || true
+
+exit 0
