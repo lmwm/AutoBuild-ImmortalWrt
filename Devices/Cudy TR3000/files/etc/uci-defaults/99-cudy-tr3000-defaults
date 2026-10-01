@@ -64,11 +64,19 @@ uci commit network
 # 之前执行，上面的 uci 改动会被随后的正常启动直接采用；主动 reload 反而可能
 # 在启动早期制造短暂中断。
 
-# ---- 3) 让 Argon 使用本地默认壁纸（img/bg1.jpg）----
-# 依据：luci-app-argon-config 的 /etc/config/argon 默认带
-#   option online_wallpaper 'bing'
-# 而主题登录页模板 sysauth.ut 的逻辑是「在线壁纸可用就用在线图，否则回落到
-#   media + "/img/bg1.jpg"」。因此必须把在线壁纸关掉（none），本地壁纸才会生效。
+# ---- 3) Argon 壁纸来源设为「本地/内置」----
+# 界面位置：LuCI -> Argon 主题设置 -> 壁纸来源（Wallpaper source）-> 本地（Built-in），
+# 对应 uci 值就是 online_wallpaper='none'（luci-app-argon-config 的默认值是 'bing'，
+# 即"必应在线壁纸"，不关掉的话本地图不会被使用）。
+#
+# 主题取本地图的逻辑（ucode/template/themes/argon/sysauth.ut）：
+#   online_wallpaper 为空或 'none' -> 跳过在线壁纸
+#   -> fetchMedia("/www/luci-static/argon/background/") 列出该目录下所有
+#      jpg/jpeg/png/gif/webp/mp4/webm 文件，随机取一张作为登录页背景
+#   -> 一张都没有时才回落到 img/bg1.jpg
+# 因此本地壁纸只需把图片放进 files/www/luci-static/argon/background/ 即可，
+# 不需要改主题模板，也不需要改这个脚本。
+#
 # 本文件序号 99 大于该包的 uci-defaults，执行顺序在后；若 argon 包未启用
 # （没有 /etc/config/argon），uci 会直接失败，用 || true 忽略。
 uci -q set argon.@global[0].online_wallpaper='none' || true

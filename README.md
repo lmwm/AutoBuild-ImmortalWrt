@@ -20,8 +20,10 @@
 │       ├── Device.yaml        # 设备参数（型号、TARGET）+ 软件包列表（启用/禁用）
 │       ├── Build.sh           # 构建脚本（外部包克隆 + 设备定制，如改 DTS）
 │       └── files/             # 用户态文件覆盖（与固件根目录一一对应）
-│           ├── etc/uci-defaults/99-cudy-tr3000-defaults  # 默认 lan IP、网口归属、Argon 本地壁纸
-│           └── www/luci-static/argon/img/bg1.jpg         # Argon 默认壁纸
+│           ├── etc/uci-defaults/99-cudy-tr3000-defaults      # 默认 lan IP、网口归属、Argon 壁纸来源
+│           └── www/luci-static/argon/
+│               ├── background/bg1.png   # 登录页默认壁纸（主题扫描该目录）
+│               └── img/bg1.jpg          # 同图兜底（主题写死的回退路径）
 ├── README.md
 └── .gitignore
 ```
@@ -365,6 +367,7 @@ fi
 | lan 地址 | `10.0.0.1/8`（netmask `255.0.0.0`） | 首次启动时写入 `/etc/config/network` |
 | 网口归属 | `eth0`、`eth1` **都**属于 lan（`br-lan`） | 上游默认是 `lan=eth1`、`wan=eth0`；本固件把两个口都收进 lan，`wan` 不再占用物理口 |
 | wan 接口 | 保留但不绑定设备（`proto=none`） | 不删除 `network.wan`，因为 `/etc/config/firewall` 的 wan 区域引用它 |
+| Argon 壁纸来源 | `online_wallpaper='none'`（界面显示「本地 / Built-in」） | 不设的话默认是 `bing`（在线壁纸），本地图不会被使用 |
 
 依据（已按 ImmortalWrt v25.12.2 核实）：上游 `target/linux/mediatek/filogic/base-files/etc/board.d/02_network` 对 `cudy,tr3000-v1-ubootmod` 的默认分配是 `ucidef_set_interfaces_lan_wan eth1 eth0`；`bin/config_generate` 对 lan 强制建 bridge 并生成 `network.@device[0]`（`br-lan`）。两个网口是直连 MAC/PHY（无 switch 芯片）：`eth0`=`gmac0`（外置 2.5G PHY）、`eth1`=`gmac1`（内置千兆 PHY）。
 
@@ -374,13 +377,13 @@ fi
 
 #### Argon 主题默认壁纸
 
-默认壁纸文件是 `Devices/Cudy TR3000/files/www/luci-static/argon/img/bg1.jpg`（1920×1080），随 `files/` 覆盖到 `/www/luci-static/argon/img/bg1.jpg`：
+默认壁纸文件是 `Devices/Cudy TR3000/files/www/luci-static/argon/background/bg1.png`（1920×1080，PNG 原图，源图 `Wapper.png`，未做任何转码）：
 
-- **文件名保持 `.jpg`**：Argon 的默认背景路径写死在模板里（`media + "/img/bg1.jpg"`），主题自带的同名文件就是背景图，换图只能整份替换这个文件。
-- **文件内容可以是 PNG**：本仓库放的就是 PNG 原图（源图 `Wapper.png`，2.3 MB，**未做任何转码**）。浏览器按内容识别图片格式，`<img>` 能正常渲染；只是扩展名与内容不一致，对固件功能无影响。
-- 因此**整份替换同名文件**即可改默认壁纸，不需要改主题代码；`files/` 的注入晚于主题包解包，覆盖必然生效。
-- **必须同时关掉"在线壁纸"**：`luci-app-argon-config` 的 `/etc/config/argon` 默认带 `option online_wallpaper 'bing'`，而模板逻辑是「在线壁纸可用就用在线图，否则回落本地 `img/bg1.jpg`」。所以 `99-cudy-tr3000-defaults` 会把 `argon.@global[0].online_wallpaper` 设为 `none`（该脚本序号 99 晚于该包的 uci-defaults，能覆盖其默认值）。需要在线壁纸时在 LuCI 的 **Argon 主题设置**里改回即可。
-- 想缩小体积时可把该文件转成同尺寸 JPEG（体积约为 PNG 的 1/5，肉眼无差），源图 `Wapper.png` 保留在工作区根目录。
+- **放在 `background/` 目录即可，不需要改主题代码**：Argon 的登录页模板 `ucode/template/themes/argon/sysauth.ut` 会用 `fetchMedia("/www/luci-static/argon/background/")` 列出该目录下所有图片/视频（`jpg jpeg png gif webp mp4 webm`）并**随机取一张**作为登录页背景；目录里只有一张就是它。这也是 LuCI「Argon 主题设置 → 上传背景」使用的同一个目录（该目录的读写权限由 `luci-app-argon-config` 的 ACL 授予）。
+- **壁纸来源要选「本地/内置」**：`luci-app-argon-config` 的 `/etc/config/argon` 默认值是 `option online_wallpaper 'bing'`（必应在线壁纸），此时本地图不会被使用。`99-cudy-tr3000-defaults` 会把它设为 `none`——即设置界面里的 **本地（Built-in）**。
+- 同一个文件也放在 `www/luci-static/argon/img/bg1.jpg`（Argon 写死的路径，用于图片加载失败时的 `data-fallback` 兜底、以及视频背景的 poster）。它内容同样是 PNG 原图，只是文件名沿用主题约定；浏览器按内容识别格式，渲染正常。
+- 生成文件体积：两个副本各 2.3 MB。想缩小体积可转成同尺寸 JPEG（约 1/5，肉眼无差），源图 `Wapper.png` 保留在工作区根目录。
+- **主界面（登录后的 LuCI 页面）不走这套背景**：主题只为登录页渲染背景，`cascade.css` 里没有任何指向 `background/` 或 `img/bg1.jpg` 的规则，登录后的页面用主题色填充。
 
 #### OpenAppFilter 内核模块补丁（历史案例）
 
