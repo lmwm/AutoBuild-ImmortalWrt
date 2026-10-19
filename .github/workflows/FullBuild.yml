@@ -3,7 +3,7 @@
 # 仓库：https://github.com/lmwm/AutoBuild-ImmortalWrt
 #
 # 全量编译工作流（full）：从源码完整编译内核/工具链/软件包，可改内核、DTS 与设备定制
-# 需要分钟级快速出固件（只调软件包列表）请用 ImageBuilder.yml
+# 这是仓库唯一保留的编译模式（原 ImageBuilder 快速组装已于 2026-10-20 移除）
 #
 # 通过 device 参数选择设备
 # 设备参数从 Devices/<设备名>/Device.yaml 读取

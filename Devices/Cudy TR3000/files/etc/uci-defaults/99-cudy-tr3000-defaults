@@ -3,9 +3,9 @@
 # Cudy TR3000 首次启动网络配置（uci-defaults：只在首次启动执行一次）
 #
 # 落盘方式：本文件位于 Devices/Cudy TR3000/files/ 下，
-#   FullBuild.yml    [3.1] 由 Build.sh 的设备定制段合并进源码树 package/base-files/files/
-#   ImageBuilder.yml [IB.3] 由 FILES= 机制覆盖到 rootfs
-# 两种模式都会在固件里生成 /etc/uci-defaults/99-cudy-tr3000-defaults，
+#   由 FullBuild.yml [3.1] 的 Build.sh 设备定制段合并进源码树的
+#   package/base-files/files/，随 base-files 打进固件。
+# 固件内路径为 /etc/uci-defaults/99-cudy-tr3000-defaults，
 # 首次启动由 /etc/init.d/boot 执行，执行成功后文件被删除（不会重复运行）。
 #
 # 运行时机：晚于 preinit 的 board.d（02_network 生成 lan=eth1 / wan=eth0），

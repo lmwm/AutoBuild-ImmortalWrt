@@ -4,17 +4,19 @@
 
 - 仓库：`lmwm/AutoBuild-ImmortalWrt`
 - 全量编译工作流：**编译 ImmortalWrt 固件（全量编译）**（`FullBuild.yml`）
-- 快速组装工作流：**编译 ImmortalWrt 固件（ImageBuilder）**（`ImageBuilder.yml`）
 - 标签同步工作流：**同步版本标签**（`SyncVersions.yml`）
+- 编译模式：**仅保留全量编译（full）**。早期用于分钟级出固件的 ImageBuilder
+  快速组装模式已于 2026-10-20 移除（对应 `ImageBuilder.yml` 已删除）
 
 ## 项目结构
 
 ```
 .
-├── .github/workflows/
-│   ├── FullBuild.yml          # 全量编译工作流（从源码编译，可改内核/DTS）
-│   ├── ImageBuilder.yml       # ImageBuilder 快速组装工作流（分钟级出固件）
-│   └── SyncVersions.yml       # 版本标签同步工作流（定期维护下拉选项）
+├── .github/
+│   ├── workflows/
+│   │   ├── FullBuild.yml      # 全量编译工作流（从源码编译，可改内核/DTS）
+│   │   └── SyncVersions.yml   # 版本标签同步工作流（定期维护下拉选项）
+│   └── scripts/SyncTags.py    # 下拉选项写入脚本，由 SyncVersions.yml 调用
 ├── Devices/                   # 设备目录（每个设备一个文件夹）
 │   └── Cudy TR3000/           # 目录名与 device 下拉选项值完全一致（含空格）
 │       ├── Device.yaml        # 设备参数（型号、TARGET）+ 软件包列表（启用/禁用）
@@ -31,9 +33,9 @@
 ## 使用方法
 
 1. Fork 本仓库（首次使用建议先手动跑一次 **同步版本标签**，把版本列表补全）
-2. 进入 **Actions** -> **编译 ImmortalWrt 固件（全量编译）** 或 **编译 ImmortalWrt 固件（ImageBuilder）**
+2. 进入 **Actions** -> **编译 ImmortalWrt 固件（全量编译）**
 3. 从下拉列表选择设备与版本 -> 点击 **Run workflow**
-4. 等待编译完成（全量编译约 2-3 小时；ImageBuilder 约 10-15 分钟）
+4. 等待编译完成（约 2-3 小时）
 5. 在 Actions 页面 **Artifacts** 下载固件
 
 ## 工作流参数
@@ -48,13 +50,6 @@
 | `skip_compile` | 跳过编译（调试模式；同时跳过缓存恢复/保存，防止空缓存占住缓存键） | `false` |
 | `ruby_yjit` | 启用 ruby YJIT（关闭可甩掉整个 Rust/LLVM 工具链，省 60–130 分钟） | `true` |
 
-### ImageBuilder.yml（快速组装）
-
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `device` | 目标设备（下拉选择，值与 `Devices/<名>` 目录名一致） | `Cudy TR3000` |
-| `tag` | ImmortalWrt 版本标签（下拉选择） | `latest` |
-
 ### 版本标签（下拉选择，自动同步）
 
 **全部参数都是下拉选择，不需要手动输入任何内容**，因此不会输错版本号。
@@ -64,7 +59,7 @@
 | 项目 | 说明 |
 |------|------|
 | 运行时机 | 每周一 03:00 UTC 自动运行，也可手动触发 |
-| 行为 | 从上游拉取全部正式标签（排除 `-rc` 等预发布），取最新 `KEEP_COUNT`（当前 4）个写入 `FullBuild.yml` 与 `ImageBuilder.yml` 的 `tag.options` |
+| 行为 | 从上游拉取全部正式标签（排除 `-rc` 等预发布），取最新 `KEEP_COUNT`（当前 4）个写入 `FullBuild.yml` 的 `tag.options` |
 | 提交 | 仅在有变化时提交，提交信息为 `配置: 同步 ImmortalWrt 版本标签` |
 | 无变化 | 不产生任何提交 |
 
@@ -74,9 +69,9 @@
 
 > 若发现下拉列表长期未更新：GitHub 对长期无活动的仓库会停用定时工作流，手动触发一次 **同步版本标签** 即可恢复。
 
-### 编译缓存（可选，仅 FullBuild.yml）
+### 编译缓存（可选）
 
-`cache_enabled` 控制两类相互独立的缓存，默认开启；`ImageBuilder.yml` 不涉及编译缓存：
+`cache_enabled` 控制两类相互独立的缓存，默认开启：
 
 | 缓存 | 路径 | 作用 |
 |------|------|------|
@@ -85,7 +80,7 @@
 
 - **已不再缓存构建树**（`build_dir` + `staging_dir`）。此前那份缓存单独就有 **10.24GB**，超出 GitHub 每仓库 10GB 的配额，会把 ccache 与 dl 一起挤掉；保存一次要 6.5 分钟；而且其配套的 `[5.6]` 裁剪用 `-name 'core.*'` 误删了内核源码里的 `core.h`（`include/net/netns/core.h`），使下一次全量编译恢复该缓存后**必然报错失败**。因此构建树缓存连同配套的 `[2.7]` 时间戳重置、`[5.6]` 裁剪、`[5.7]` 保存一并移除
 - **`FullBuild.yml` 是纯全量编译**：每次从零编译，不再有「增量命中后 15-30 分钟」这一档。加速完全由 ccache 承担——它按 `系统-平台-版本-compiler_check 版本`（当前末尾为 `-cc2`）分键，同平台同版本精确命中；跨版本保留 `restore-keys`，因为 ccache 用源码与命令行哈希校验，版本不符只会失效、不会用错
-- **实测基线**（v25.12.2）：首次全量约 2 小时 51 分，其中 `feeds/packages/lang/ruby`（OpenClash 依赖）独占约 106 分钟——**这类不走 ccache 的巨包无法被 ccache 加速**，是全量编译的主要耗时来源。想缩短全量编译耗时请用 `ruby_yjit=false`（见下文），需要分钟级出固件请改用 `ImageBuilder.yml`
+- **实测基线**（v25.12.2）：首次全量约 2 小时 51 分，其中 `feeds/packages/lang/ruby`（OpenClash 依赖）独占约 106 分钟——**这类不走 ccache 的巨包无法被 ccache 加速**，是全量编译的主要耗时来源。想缩短全量编译耗时请用 `ruby_yjit=false`（见下文）
 - dl 按 `系统-平台-版本` 分键且**不跨版本复用**：dl 里是未校验的压缩包，跨版本混用可能导致某个包源码与目标版本不匹配而报校验失败。代价是每个版本各存一份
 - 两个缓存都带平台维度，将来新增不同平台的设备时不会互相污染
 - GitHub 单个缓存上限 10GB（所有缓存条目共享，超出按 LRU 淘汰）；若提示超限，编译不受影响，仅本次不保存对应缓存。`[4.3]` 会打印各构建目录的精确体积
@@ -146,59 +141,20 @@
   [5.5] 上传完整编译产物（整个 bin 目录）
 ```
 
-### ImageBuilder.yml（快速组装）
+## 构建方式：仅全量编译
 
-```
-阶段 1: 系统环境初始化
-  [1.1] 系统信息
-  [1.2] 克隆配置仓库
-  [1.3] 加载设备配置
+本仓库**只保留全量编译（full）一种模式**，直接手动触发 `FullBuild.yml`：
 
-阶段 2: 环境与版本
-  [2.1] 安装编译环境
-  [2.2] 获取版本标签（实时）
-  [2.3] 确定版本标签（解析 + 校验）
+| 工作流 | 耗时 | 适用场景 |
+|--------|------|----------|
+| `FullBuild.yml`（全量编译） | 约 2–3 小时（纯全量，ccache 只能部分加速） | 任何改动：调软件包列表、改内核、改 DTS、改设备定制 |
 
-阶段 3: 生成编译配置
-  [3.3] 生成编译配置（Device.yaml -> packages_list.txt 供 [IB.3] 使用）
+> 早期还有一个 `ImageBuilder.yml`（下载官方预编译产物 + SDK 组装固件，约 10–15 分钟，
+> 但不能改内核/补丁、不能自编 kmod）。该模式已于 **2026-10-20 按需求移除**，
+> 工作流文件已从仓库删除；如需恢复，从 git 历史取回 `ImageBuilder.yml` 并
+> 在 `SyncTags.py` 的 `EXPECTED_INPUTS_BY_FILE` 中重新登记其输入项。
 
-阶段 IB: ImageBuilder 快速构建
-  [IB.1] 下载 ImageBuilder 与 SDK（与 tag 严格对应）
-  [IB.2] SDK 编译第三方包（范围由 Build.sh 决定，未克隆则跳过）
-  [IB.3] 组装固件（make image，设备信息用 FILES= 覆盖）
-
-阶段 5: 上传固件
-  [5.1] 整理固件（重命名：编译时间 YYYYMMDD-HHMM 前缀在最前 + 定位编译产物目录）
-  [5.2] 上传 sysupgrade 固件
-  [5.3] 上传 recovery/factory 固件
-  [5.4] 上传配置文件
-  [5.5] 上传完整编译产物（整个 bin 目录）
-```
-
-## 构建方式：full 与 imagebuilder
-
-全量编译（full）与 ImageBuilder 快速组装**已拆分为两个独立工作流**，按需求选择其一手动触发：
-
-| 工作流 | 耗时 | 适用场景 | 局限 |
-|--------|------|----------|------|
-| `FullBuild.yml`（full，全量编译） | 约 2–3 小时（纯全量，ccache 只能部分加速） | 改内核、改 DTS、改设备定制 | 耗时长；不走 ccache 的巨包（如 ruby）无法加速 |
-| `ImageBuilder.yml`（imagebuilder，快速组装） | **约 10–15 分钟** | 调整软件包列表、改设备型号 | 不能改内核配置/补丁，不能自编 kmod（ABI 须配官方内核） |
-
-### imagebuilder 模式的工作方式
-
-不编译内核/工具链，而是复用官方预编译产物（与 `tag` 严格对应，保证包 ABI 一致）：
-
-1. **[IB.1]** 下载 `immortalwrt-imagebuilder-<版本>-mediatek-filogic` 与对应 SDK
-2. **[IB.2]** 用 SDK 编译 `Build.sh` 实际克隆的第三方包（多为 `PKGARCH:=all` 的脚本/主题包，不涉及内核 ABI），产出安装包放入 ImageBuilder 的 `packages/`。安装包后缀按版本而定（v25.12.x 为 `.apk`，v24.10.x 为 `.ipk`，上游按 `PACKAGE_SUFFIX := $(if $(CONFIG_USE_APK),apk,ipk)` 动态判定），工作流不写死后缀；若某个包未产出安装包会显式报错，不再静默漏装
-3. **[IB.3]** `make image PROFILE=... PACKAGES="..." [FILES="..."]` 组装固件，`PACKAGES` 列表由 `[3.3]` 从 `Device.yaml` 生成；`make image` **之前**修改 IB 内 DTS 源的 `model` 属性（现场编译 dtb，型号改名在 dtb 层生效，见下文「设备型号」），`FILES=` 为可选的用户态文件覆盖
-
-> **`FILES=` 是可选项**：`Devices/<设备>/files` 目录不存在时 `[IB.3]` 直接跳过用户态文件覆盖，不报错。使用时**路径不能含空格。** 设备目录名（如 `Cudy TR3000`）含空格，而上游 `include/rules.mk` 的 `file_copy` 里是未加引号的 `$(CP) $(1) $(2)`（`CP:=cp -fpR`），路径会被 shell 拆成两个参数，报两条 `cp: cannot stat` 并让 `prepare_rootfs` 失败（2026-09-25 实测）。因此 `[IB.3]` 先把 `Devices/<设备>/files` 复制到不含空格的中转目录 `$RUNNER_TEMP/ib-files`，再把该路径传给 `FILES=`。`make image` 完成后还会回到 rootfs 逐个核对文件是否落地——上游 `if [ -d '$(2)' ]` 在目录缺失时静默跳过，这一步把「覆盖悄悄失效」变成显式失败。
-
-> **[IB.2] 的编译范围由 `Build.sh` 决定，不在工作流里硬编码包名。** 它比对 `Build.sh` 执行前后 `package/` 下 Makefile 的差集来识别新增的包（只认含 `BuildPackage` 或 `include package.mk`/`luci.mk` 的 Makefile，因此不会误抓仓库附带的纯工具 Makefile），包名优先取 `PKG_NAME:=`、缺失时回退为目录名。
->
-> 若 `Build.sh` 未克隆任何包（例如克隆语句被注释），该步骤直接跳过，对应软件包由 `[IB.3]` 从官方源安装——**此时需保证 `Device.yaml` 里启用的包在官方源中存在**，否则 `make image` 会因找不到包而失败。增删第三方包只需改 `Devices/<设备>/` 下的配置，不必再动工作流。
-
-### 设备型号（两个工作流）
+### 设备型号（dtb 层改名）
 
 型号显示的真实链路（已按 ImmortalWrt v25.12.2 核实）：
 
@@ -215,27 +171,20 @@ dtb 的 model 属性
 且 `/tmp/sysinfo/model` 位于 tmpfs、每次启动由 `02_sysinfo` 重新生成，用户态
 一次性补丁无法持久生效。
 
-两个工作流都改 dtb，只是位置不同：
+做法：`Build.sh` 的设备定制段读取 `Device.yaml` 的 `Model_dts`（DTS 里的原始名）
+与 `Model`（目标名），把源码树 `target/linux/mediatek/dts/<设备>.dts` 里的原始名
+替换为目标名，编译时生成 dtb，型号在 dtb 层生效。
 
-| 工作流 | 做法 |
-|------|------|
-| `FullBuild.yml`（full） | `Build.sh` 的设备定制段修改源码树 `target/linux/mediatek/dts/<设备>.dts` 的 `model`，编译时生成 dtb |
-| `ImageBuilder.yml`（imagebuilder） | `[IB.3]` 在 `make image` 前把新型号写进 IB 内**预编译的 dtb**（直接改 dtb 二进制的 model 字符串：整串替换 + 短名补 NUL，fdt 总长与 offset 不变），并同步 sed DTS 源保持一致。新名字节数须 ≤ 原名，否则报错请改用 `FullBuild.yml` |
-
-型号字符串由 `Device.yaml` 的 `Model_dts`（DTS 原始值）与 `Model`（目标值）提供，
-`ImageBuilder.yml` 的替换带校验：找不到 DTS 文件、或构建后 dtb 仍含旧型号，
-都会让构建显式失败，不会静默出一个没改名的固件。
+- 两个字段缺失、相同，或 DTS 中找不到原始名时，脚本输出明确提示并跳过，不会静默出错
+- 型号带空格，替换前会转义 sed 元字符
 
 ### 注意事项
 
-- `ImageBuilder.yml` 不涉及编译缓存（没有 `cache_enabled` 输入，无需 ccache/dl）
-- 若目标 tag 尚未发布官方 ImageBuilder，`[IB.1]` 会报错退出，此时改用 `FullBuild.yml`
-- 内核模块类第三方包（`kmod-xxx`）需与官方内核 ABI 严格匹配；当前配置已移除 `kmod-oaf`，若将来加回请自行评估
-- **`[IB.1]` 要求归档唯一命中**：同一目录若出现多个 ImageBuilder 或 SDK 归档（多宿主架构、多 gcc 版本等），会列出候选并报错退出，不会静默取第一个；下载后还会做一次归档完整性校验，避免下载被截断后在解压阶段才暴露
-- **`[IB.2]` 会核对第三方包产物**：按版本实际后缀收集（`.apk` 或 `.ipk`），并逐个确认 `Build.sh` 克隆的每个包都产出了安装包；若有包缺失（make 未报错但产物为空）则显式失败，不会静默漏装
-- **`[IB.3]` 会核对用户包已装入固件**：`make image` 后用上游生成的 `*.manifest` 逐个比对 `Device.yaml` 里启用的包；若 `packages_list.txt` 异常为空导致只构建出默认固件，会显式失败，不会静默产出缺包的固件
+- 内核模块类第三方包（`kmod-xxx`）需与源码树内核 ABI 匹配；当前配置已移除 `kmod-oaf`，若将来加回请自行评估
+- `[4.2]` 编译失败时会把构建日志末尾与 `V=s` 详细日志打印出来，不会静默失败
+- `[5.1]` 会校验固件产物目录存在；`[5.5]` 上传整个 `bin` 目录（含安装包与 manifest）
 
-### ruby YJIT 开关（`ruby_yjit`，仅 FullBuild.yml）
+### ruby YJIT 开关（`ruby_yjit`）
 
 `luci-app-openclash` 依赖 `ruby`，而 ruby 的 `RUBY_ENABLE_YJIT` 在 aarch64 上默认开启；YJIT 是用 Rust 实现的 JIT 编译器，其构建依赖 `PKG_BUILD_DEPENDS: RUBY_ENABLE_YJIT:rust/host`，会拉入整个 Rust/LLVM 工具链。实测 **ruby + rust 合计占编译时间约 77%**（ruby 131 分钟 + rust 与其并行）。
 
@@ -244,7 +193,7 @@ OpenClash 只用 ruby 跑订阅规则转换等一次性短脚本，JIT 加速没
 1. 把 `feeds/packages/lang/ruby/Makefile` 中 `RUBY_ENABLE_YJIT` 的 `default y` 改为 `default n`
 2. 在 `.config` 显式写入 `# CONFIG_RUBY_ENABLE_YJIT is not set`
 
-两者都必须在 `[3.6]` defconfig **之前**完成——依赖解析发生在 defconfig，晚了就拦不住 `rust/host` 被拉入构建图。`ImageBuilder.yml` 用官方预编译的 ruby 包，不受此开关影响。
+两者都必须在 `[3.6]` defconfig **之前**完成——依赖解析发生在 defconfig，晚了就拦不住 `rust/host` 被拉入构建图。
 
 ## 配置文件说明
 
@@ -257,7 +206,7 @@ OpenClash 只用 ruby 跑订阅规则转换等一次性短脚本，JIT 加速没
 Model: "Cudy TR3000"
 
 # DTS 中的原始型号名（dtb model 属性）
-# ImageBuilder 工作流在 make image 前把它替换为 Model；FullBuild 由 Build.sh 的设备定制段处理
+# 由 Build.sh 的设备定制段把 DTS 里的此字符串替换为 Model
 # 可选；缺失或与 Model 相同则跳过型号替换
 Model_dts: "Cudy TR3000 v1 (OpenWrt U-Boot layout)"
 
@@ -327,14 +276,13 @@ disable_components:
    - 任一侧版本无法提取 → 无法证明相同，采用外部版本
 2. **设备定制**：合并 `files/` 用户态文件、修改 DTS、内核配置等（目标文件带 `if [ -f ]` 防护，不存在时跳过）
 
-`files/` 的内容与**固件根目录**一一对应，两个工作流的注入方式不同但结果一致：
+`files/` 的内容与**固件根目录**一一对应，由 `[3.1]` 的 `Build.sh` 并进源码树
+`package/base-files/files/`（base-files 的 `Package/install` 会 `cp ./files/*` 收集，
+已按 v25.12.2 核实），随 base-files 一起打进固件。合并后脚本会逐个核对文件是否
+真的落地，缺失即失败。
 
-| 工作流 | 注入方式 |
-|--------|----------|
-| `FullBuild.yml` | `[3.1]` 的 Build.sh 把 `files/` 并进源码树 `package/base-files/files/`（base-files 的 `Package/install` 会 `cp ./files/*` 收集） |
-| `ImageBuilder.yml` | `[IB.3]` 用 `FILES=` 机制把同一个 `files/` 覆盖到 rootfs（不重编 base-files） |
-
-`FullBuild.yml` 的 `[3.1]` 在源码树中完整执行；`ImageBuilder.yml` 的 `[IB.2]` 在 SDK 中执行（设备定制段因目标文件不存在自动跳过，不影响第三方包识别）。全部走"用自带"时 `[IB.2]` 的差集为空即跳过 SDK 编译，对应包由 `[IB.3]` 从官方源安装：
+`Build.sh` 的 `files/` 来源路径按脚本自身位置推导，也接受工作流传入的
+`DEVICE_DIR` / `DEVICE_FILES` 环境变量覆盖：
 
 ```bash
 #!/bin/bash
@@ -350,15 +298,14 @@ add_or_keep luci-app-openclash \
     https://github.com/vernesong/OpenClash.git OpenClash
 
 # ---- 2) 设备定制：合并用户态文件 + 修改设备型号名称 ----
-DEVICE_FILES="${DEVICE_FILES:-${GITHUB_WORKSPACE}/${DEVICE_DIR}/files}"
+BUILD_SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEVICE_DIR="${DEVICE_DIR:-$BUILD_SH_DIR}"
+DEVICE_FILES="${DEVICE_FILES:-$DEVICE_DIR/files}"
 if [ -d "$DEVICE_FILES" ]; then
     cp -a "$DEVICE_FILES/." "$OPENWRT_DIR/package/base-files/files/"
 fi
 
-DTS_FILE="target/linux/mediatek/dts/mt7981b-cudy-tr3000-v1-ubootmod.dts"
-if [ -f "$DTS_FILE" ]; then
-    sed -i 's/Cudy TR3000 v1 (OpenWrt U-Boot layout)/Cudy TR3000/g' "$DTS_FILE"
-fi
+# 型号字符串取自同目录 Device.yaml 的 Model_dts / Model
 ```
 
 #### 默认网络配置（lan IP 与网口归属）
@@ -374,7 +321,7 @@ fi
 
 依据（已按 ImmortalWrt v25.12.2 核实）：上游 `target/linux/mediatek/filogic/base-files/etc/board.d/02_network` 对 `cudy,tr3000-v1-ubootmod` 的默认分配是 `ucidef_set_interfaces_lan_wan eth1 eth0`；`bin/config_generate` 对 lan 强制建 bridge 并生成 `network.@device[0]`（`br-lan`）。两个网口是直连 MAC/PHY（无 switch 芯片）：`eth0`=`gmac0`（外置 2.5G PHY）、`eth1`=`gmac1`（内置千兆 PHY）。
 
-> 用 uci-defaults 而不是改 `02_network`/`config_generate` 源码，是因为 **ImageBuilder 不重编 base-files**（它只解包官方预编译包，改源码树里的这两个文件不会进固件），而 `files/` 与 `FILES=` 两条注入路径对两个工作流都有效，配置只有一份。
+> 用 uci-defaults 而不是改 `02_network`/`config_generate` 源码，是因为 `files/` 注入方式对全量编译有效且只需维护一份配置，改上游源码则要跟随版本重新打补丁。
 
 > DHCP 池未改动：`config_generate` 生成的 `dhcp.lan` 仍是起始 `100`、数量 `150`（即 `10.0.0.100` 起分配 150 个地址）。在 /8 网段下够用；要扩池在 LuCI 的 **网络 → 接口 → lan → DHCP 服务器**里改。
 
@@ -445,7 +392,7 @@ mkdir -p "Devices/NanoPi R4S"
 
 ```yaml
 Model: "NanoPi R4S"
-# 可选：DTS 中的原始型号名（ImageBuilder 工作流替换为 Model 用，无需改型号就不写）
+# 可选：DTS 中的原始型号名（Build.sh 的型号替换用它作为「原字符串」）
 # Model_dts: "..."
 Target: "CONFIG_TARGET_rockchip_armv8_DEVICE_friendlyarm_nanopi-r4s=y"
 
@@ -482,7 +429,7 @@ fi
 
 ### 4. 注册设备
 
-编辑 `.github/workflows/FullBuild.yml` 与 `.github/workflows/ImageBuilder.yml`，分别在 `device` 的 `options` 中添加：
+编辑 `.github/workflows/FullBuild.yml`，在 `device` 的 `options` 中添加：
 
 ```yaml
 device:
@@ -509,7 +456,8 @@ device:
 | `...-config` | `20260922-1930-ImmortalWrt-CudyTR3000-v25.12.2-config.zip` | 编译配置，文件名为 `编译时间-设备型号-ImmortalWrt-V版本-构建号-config.config` |
 | `...-full` | `20260922-1930-ImmortalWrt-CudyTR3000-v25.12.2-full.zip` | **完整编译产物**（见下） |
 
-> **`ImageBuilder.yml` 通常只有 3 个 Artifact（没有 `-recovery`）。** 这不是工作流缺陷，而是上游 ImageBuilder 的固有行为：`recovery` 镜像由 `KERNEL_INITRAMFS` 产出，而 ImageBuilder 在打包时会显式删除预编译的 initramfs 内核（`target/imagebuilder/Makefile` 中的 `rm -f $(IB_KDIR)/vmlinux-initramfs*`，已按 ImmortalWrt v25.12.2 核实），因此无法生成 `*recovery*`；该设备（`cudy_tr3000-v1-ubootmod`）本身有 `IMAGES := sysupgrade.itb`，`FullBuild.yml` 则会正常产出 `initramfs-recovery.itb`。此时 `[5.3]` 步骤输出一条 `No files were found ...` 的警告并上传 0 个文件，属预期现象。
+> 全量编译对该设备会正常产出 `initramfs-recovery.itb`。若某次没有 recovery 产物，
+> `[5.3]` 输出一条 `No files were found ...` 的警告并上传 0 个文件，属预期现象。
 
 其中 `-full` 上传的是**整个 `bin` 输出目录**（`bin/`）内的全部内容，而不是单独的几个固件，包含：
 

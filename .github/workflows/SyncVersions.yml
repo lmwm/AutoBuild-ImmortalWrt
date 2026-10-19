@@ -2,17 +2,16 @@
 # 同步版本标签
 # 仓库：https://github.com/lmwm/AutoBuild-ImmortalWrt
 #
-# 目的：让 FullBuild.yml 与 ImageBuilder.yml 中 tag 的下拉选项保持最新，
-#       避免手动输入版本号出错。
+# 目的：让 FullBuild.yml 中 tag 的下拉选项保持最新，避免手动输入版本号出错。
 #
 # 背景：GitHub Actions 的 workflow_dispatch 下拉选项（type: choice）必须在
 #       工作流文件中静态列出，官方不支持在运行时动态生成。因此这里用定时
-#       工作流从上游拉取标签，自动改写两个编译工作流的 options。
+#       工作流从上游拉取标签，自动改写编译工作流的 options。
 #
 # 行为：
 #   - 每周一 03:00 UTC 自动运行，也可手动触发
 #   - 拉取上游全部正式标签（排除 -rc 等预发布版本）
-#   - 保留最新的 KEEP_COUNT 个，重新写入两个编译工作流的 tag.options
+#   - 保留最新的 KEEP_COUNT 个，重新写入编译工作流的 tag.options
 #   - 无变化则不做任何提交
 #   - 有变化则用 SYNC_TOKEN 直接提交推送
 #
@@ -92,10 +91,10 @@ jobs:
       - name: "[3] 更新编译工作流的下拉选项"
         run: |
           echo "=========================================="
-          echo "  更新编译工作流选项（FullBuild / ImageBuilder）"
+          echo "  更新编译工作流选项（FullBuild）"
           echo "=========================================="
 
-          for wf in FullBuild.yml ImageBuilder.yml; do
+          for wf in FullBuild.yml; do
             echo ""
             echo "--- $wf ---"
             python3 .github/scripts/SyncTags.py \
@@ -106,7 +105,7 @@ jobs:
 
           echo ""
           echo "更新后的选项预览:"
-          for wf in FullBuild.yml ImageBuilder.yml; do
+          for wf in FullBuild.yml; do
             echo "--- $wf ---"
             awk '/^      tag:/{f=1} f{print} f&&/^        default:/{exit}' ".github/workflows/$wf"
           done
@@ -193,7 +192,7 @@ jobs:
 
           # 未配置 PAT：给出明确指引，而不是无意义地失败
           if [ -z "$SYNC_TOKEN" ]; then
-            # 两个编译工作流的 tag.options 由 [3] 写成相同内容，取一个展示即可
+            # 当前只有 FullBuild.yml 一个编译工作流维护 tag.options
             CURRENT=$(awk '/^      tag:/{f=1} f{print} f&&/^        default:/{exit}' .github/workflows/FullBuild.yml \
               | grep '^          - ' | sed 's/^          - //' | tr -d '"' | tr '\n' ' ')
             DESIRED=$(printf 'latest %s' "$(head -n "$KEEP_COUNT" tags.txt | tr '\n' ' ')")
@@ -226,7 +225,7 @@ jobs:
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add .github/workflows/FullBuild.yml .github/workflows/ImageBuilder.yml
+          git add .github/workflows/FullBuild.yml
           git commit -m "配置: 同步 ImmortalWrt 版本标签（最新 ${LATEST}）"
 
           echo "[OK] 已提交，开始推送"

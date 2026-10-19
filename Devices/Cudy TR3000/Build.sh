@@ -2,14 +2,13 @@
 #
 # Cudy TR3000 构建脚本（外部软件包 + 设备定制）
 #
-# 执行时机（均在源码树/SDK 根目录下执行）：
-#   FullBuild.yml    [3.1]：feeds install 之后、make defconfig 之前，完整执行
-#   ImageBuilder.yml [IB.2]：SDK 内 feeds install 之后执行（外部包段有效；
-#                     设备定制段的目标文件在 SDK 中不存在，自动跳过）
+# 执行时机：
+#   FullBuild.yml [3.1]：feeds install 之后、make defconfig 之前，
+#                        cd 进源码树后以绝对路径调用（工作目录为源码树根）
 #
 # 段落约定（顺序即执行顺序）：
 #   1) 外部软件包：git clone 到 package/app/，必要时对外部包打补丁
-#   2) 设备定制：合并 files/ 用户态文件、改 DTS、内核配置等（仅 FullBuild 源码树中生效）
+#   2) 设备定制：合并 files/ 用户态文件、改 DTS、内核配置等
 #
 # 历史：本文件由原 Packages.sh 与 Customize.sh 合并而来（两段各取其一）。
 #
@@ -28,9 +27,8 @@ OPENWRT_DIR="$(pwd)"
 #   - 任一侧版本无法提取                -> 无法证明相同，采用外部版本
 # 版本取自包 Makefile 的 PKG_VERSION（去引号与 v 前缀，sort -V 语义比较）。
 #
-# 本段在 feeds install 之后执行（FullBuild [3.1] / ImageBuilder [IB.2]），
-# package/feeds/ 下才有可扫的符号链接；全部走"用自带"时下游直接使用
-# feeds 版本，[IB.2] 的差集识别为空即跳过 SDK 编译。
+# 本段在 feeds install 之后执行（[2.6] -> [3.1]），package/feeds/ 下才有
+# 可扫的符号链接。
 # ============================================================
 
 EXT_TMP_DIR="${TMPDIR:-/tmp}/ext-pkg-src"
@@ -150,9 +148,7 @@ add_or_keep luci-app-harbor-file \
 # 与上游自带文件同等生效（已按 ImmortalWrt v25.12.2 的
 # package/base-files/Makefile 核实）。
 #
-# 作用域说明：只影响跟随源码树构建的 base-files（FullBuild）。
-# ImageBuilder 不重编 base-files，它走工作流 [IB.3] 的 FILES= 机制读同一个
-# files/ 目录，两条路径的最终内容一致。
+# 作用域说明：直接并进 base-files 包，随源码树一起编译。
 #
 # 路径来源（2026-10-20 修复）：本脚本被 `cd immortalwrt` 后以绝对路径调用，
 # 当前目录是源码树而不是设备目录，因此不能用相对路径 Devices/<设备>/files。
@@ -193,8 +189,10 @@ EOF
             exit 1
         fi
     else
-        # 源码树里没有 base-files 时只可能是 SDK/ImageBuilder 环境，属正常
-        echo "[WARN] 未找到 $BASE_FILES_DIR，跳过设备文件合并（ImageBuilder 走工作流 FILES=）"
+        # 源码树结构异常：没有 base-files 时设备文件无处合并，必须显式失败，
+        # 否则固件会静默缺少默认配置。
+        echo "[ERROR] 未找到 $BASE_FILES_DIR，无法合并设备文件"
+        exit 1
     fi
 else
     echo "[INFO] 无设备文件目录（$DEVICE_FILES），跳过用户态文件覆盖"
@@ -202,21 +200,41 @@ fi
 
 # -----------------------------------------------------------
 # 修改设备型号名称
+#
+# 型号字符串从同目录的 Device.yaml 读取（Model / Model_dts），不再在脚本里
+# 重复硬编码：改名时只需改 Device.yaml 一处（Model_dts 为 DTS 里的原始名，
+# Model 为目标名）。两个字段缺失或相同则跳过，不做任何替换。
 # -----------------------------------------------------------
 DTS_FILE="target/linux/mediatek/dts/mt7981b-cudy-tr3000-v1-ubootmod.dts"
 
-if [ -f "$DTS_FILE" ]; then
-    sed -i 's/Cudy TR3000 v1 (OpenWrt U-Boot layout)/Cudy TR3000/g' "$DTS_FILE"
-    echo "[OK] 设备型号已修改: Cudy TR3000 v1 (OpenWrt U-Boot layout) -> Cudy TR3000"
+DEVICE_CONF="$DEVICE_DIR/Device.yaml"
+YAML_MODEL=""
+YAML_MODEL_DTS=""
+if [ -f "$DEVICE_CONF" ]; then
+    # 用 sed 而非 awk：型号带空格，awk '{print $2}' 会被截断
+    YAML_MODEL=$(grep '^Model:' "$DEVICE_CONF" | sed 's/^Model: *//' | tr -d '"' | tr -d "'")
+    YAML_MODEL_DTS=$(grep '^Model_dts:' "$DEVICE_CONF" | sed 's/^Model_dts: *//' | tr -d '"' | tr -d "'")
+fi
+
+if [ -z "$YAML_MODEL_DTS" ] || [ "$YAML_MODEL_DTS" = "$YAML_MODEL" ]; then
+    echo "[INFO] Device.yaml 未配置可用的 Model_dts（或与 Model 相同），跳过型号修改"
+elif [ ! -f "$DTS_FILE" ]; then
+    echo "[WARN] DTS 文件不存在: $DTS_FILE，跳过型号修改"
+elif grep -qF "$YAML_MODEL_DTS" "$DTS_FILE"; then
+    # 转义 sed 替换对里的元字符，避免型号名中的 . * [ ] \ / & 被当正则
+    SED_FROM=$(printf '%s' "$YAML_MODEL_DTS" | sed 's/[][\\.*^$\/&]/\\&/g')
+    SED_TO=$(printf '%s' "$YAML_MODEL" | sed 's/[&\/]/\\&/g')
+    sed -i "s|$SED_FROM|$SED_TO|g" "$DTS_FILE"
+    echo "[OK] 设备型号已修改: $YAML_MODEL_DTS -> $YAML_MODEL"
 else
-    echo "[WARN] DTS 文件不存在: $DTS_FILE，跳过型号修改（ImageBuilder/SDK 中属正常）"
+    # DTS 里找不到原始名：多半是上游已经改名，显式告警而不是静默继续
+    echo "[WARN] DTS 中未找到 \"$YAML_MODEL_DTS\"，型号未修改: $DTS_FILE"
 fi
 
 # -----------------------------------------------------------
 # 其他设备定制（按需添加）
 # -----------------------------------------------------------
 # 默认 lan 口 IP 与网口归属不在这里改：两者都通过 files/etc/uci-defaults/
-# 99-cudy-tr3000-defaults 在首次启动时设置（FullBuild 与 ImageBuilder 一致），
-# 见上方"合并本设备的用户态文件"。
+# 99-cudy-tr3000-defaults 在首次启动时设置，见上方"合并本设备的用户态文件"。
 
 echo "[OK] Build.sh 执行完成"

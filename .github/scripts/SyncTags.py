@@ -11,6 +11,7 @@
 
 标签文件每行一个标签，按版本从新到旧排列。
 支持的工作流文件见 EXPECTED_INPUTS_BY_FILE（按文件名登记各自的输入项集合）。
+当前仅登记 FullBuild.yml；ImageBuilder.yml 已于 2026-10-20 随快速组装模式一并移除。
 """
 
 import os
@@ -28,6 +29,7 @@ ITEM_INDENT = '          '
 # 注意：此表必须与对应工作流的 workflow_dispatch.inputs 保持一致，
 #       增删输入项时需同步修改，否则本脚本会在写回校验时失败退出。
 #       键为工作流文件名（basename），值为该文件应有的全部输入项。
+# 当前只有全量编译工作流；ImageBuilder 模式已于 2026-10-20 移除。
 EXPECTED_INPUTS_BY_FILE = {
     'FullBuild.yml': (
         'device',
@@ -35,10 +37,6 @@ EXPECTED_INPUTS_BY_FILE = {
         'cache_enabled',
         'skip_compile',
         'ruby_yjit',
-    ),
-    'ImageBuilder.yml': (
-        'device',
-        'tag',
     ),
 }
 
