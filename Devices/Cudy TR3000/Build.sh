@@ -153,8 +153,17 @@ add_or_keep luci-app-harbor-file \
 # 作用域说明：只影响跟随源码树构建的 base-files（FullBuild）。
 # ImageBuilder 不重编 base-files，它走工作流 [IB.3] 的 FILES= 机制读同一个
 # files/ 目录，两条路径的最终内容一致。
+#
+# 路径来源（2026-10-20 修复）：本脚本被 `cd immortalwrt` 后以绝对路径调用，
+# 当前目录是源码树而不是设备目录，因此不能用相对路径 Devices/<设备>/files。
+# 优先取环境变量 DEVICE_FILES / DEVICE_DIR（由工作流显式传入），否则按
+# 「本脚本所在目录就是设备目录」推导。此前只写 ${GITHUB_WORKSPACE}/${DEVICE_DIR}
+# 而工作流从未设置 DEVICE_DIR，实际展开成 ${GITHUB_WORKSPACE}//files，导致
+# 整个 files/ 段被静默跳过（run 39017537068 实证），默认网络与壁纸都没进固件。
 # -----------------------------------------------------------
-DEVICE_FILES="${DEVICE_FILES:-${GITHUB_WORKSPACE}/${DEVICE_DIR}/files}"
+BUILD_SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEVICE_DIR="${DEVICE_DIR:-$BUILD_SH_DIR}"
+DEVICE_FILES="${DEVICE_FILES:-$DEVICE_DIR/files}"
 
 if [ -d "$DEVICE_FILES" ]; then
     BASE_FILES_DIR="$OPENWRT_DIR/package/base-files/files"
@@ -162,9 +171,30 @@ if [ -d "$DEVICE_FILES" ]; then
         # 逐项 cp -a：files/ 里只放"整份替换"的文件，不删除上游自带内容
         cp -a "$DEVICE_FILES/." "$BASE_FILES_DIR/"
         echo "[OK] 已合并设备文件到 base-files: $DEVICE_FILES"
-        find "$DEVICE_FILES" -type f | sed "s|^$DEVICE_FILES/|  [FILE] /|"
+
+        # ---- 生效校验：逐个确认文件真的落在 base-files/files 里 ----
+        # 上游 Package/base-files/install 是 `$(CP) ./files/* $(1)/`（已按
+        # ImmortalWrt v25.12.2 核实），只要文件在 files/ 下就会进固件。
+        # 这里多看一眼，把「复制路径写错但静默继续」变成显式失败。
+        missing_files=0
+        while IFS= read -r rel; do
+            [ -n "$rel" ] || continue
+            if [ -e "$BASE_FILES_DIR/$rel" ]; then
+                echo "  [FILE] /$rel"
+            else
+                echo "[ERROR] 设备文件未落地: $BASE_FILES_DIR/$rel"
+                missing_files=1
+            fi
+        done <<EOF
+$(cd "$DEVICE_FILES" && find . -type f | sed 's|^\./||')
+EOF
+        if [ "$missing_files" -ne 0 ]; then
+            echo "[ERROR] 设备文件合并不完整，固件内的默认配置可能缺失"
+            exit 1
+        fi
     else
-        echo "[WARN] 未找到 $BASE_FILES_DIR，跳过设备文件合并"
+        # 源码树里没有 base-files 时只可能是 SDK/ImageBuilder 环境，属正常
+        echo "[WARN] 未找到 $BASE_FILES_DIR，跳过设备文件合并（ImageBuilder 走工作流 FILES=）"
     fi
 else
     echo "[INFO] 无设备文件目录（$DEVICE_FILES），跳过用户态文件覆盖"

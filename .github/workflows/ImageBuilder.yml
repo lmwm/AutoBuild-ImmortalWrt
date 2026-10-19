@@ -284,89 +284,63 @@ jobs:
 
           # 解析 Device.yaml 中的软件包列表（enable / disable / disable_components）
           # 条目过滤只认 "  - 名称" 形式，避免段间注释或结构变化被误收为包名
+          #
+          # 段边界（2026-10-20 修复）：改成单次扫描，每个顶格键名都会切换/清空
+          # 当前段。此前三段各自独立扫描，只有 enable 段在遇到 `disable:` 时收尾，
+          # 遇到其它顶格键（例如将来新增的段）会一直沿用上一段状态，后续所有
+          # 列表项都会被当成 enable 包写进 .config 并进入 PACKAGES 列表；
+          # 未登记的段名现在直接忽略。与 FullBuild.yml 的 [3.3] 保持同一实现。
           PACKAGES_FILE="${DEVICE_DIR}/Device.yaml"
           if [ -f "$PACKAGES_FILE" ]; then
 
-            # 解析启用的包
-            echo ""
-            echo "启用的包:"
-            in_enable=false
-            while IFS= read -r line; do
-              # 检测 enable: 段落
-              if echo "$line" | grep -q "^enable:"; then
-                in_enable=true
-                continue
-              fi
-              # 检测 disable: 段落（结束 enable）
-              if echo "$line" | grep -q "^disable:"; then
-                in_enable=false
-                continue
-              fi
-              # 处理 enable 段落的包（只认 "- " 列表行）
-              if [ "$in_enable" = true ] && echo "$line" | grep -qE '^[[:space:]]*- '; then
-                pkg=$(echo "$line" | sed 's/^[[:space:]]*- //' | sed 's/#.*//' | xargs)
-                if [ -n "$pkg" ]; then
-                  echo "CONFIG_PACKAGE_${pkg}=y" >> immortalwrt/.config
-                  echo "  + ${pkg}"
-                fi
-              fi
-            done < "$PACKAGES_FILE"
-
-            # 解析禁用的包
-            echo ""
-            echo "禁用的包:"
-            in_disable=false
-            while IFS= read -r line; do
-              # 检测 disable: 段落
-              if echo "$line" | grep -q "^disable:"; then
-                in_disable=true
-                continue
-              fi
-              # 检测 disable_components: 段落（结束 disable）
-              if echo "$line" | grep -q "^disable_components:"; then
-                in_disable=false
-                continue
-              fi
-              # 处理 disable 段落的包（只认 "- " 列表行）
-              if [ "$in_disable" = true ] && echo "$line" | grep -qE '^[[:space:]]*- '; then
-                pkg=$(echo "$line" | sed 's/^[[:space:]]*- //' | sed 's/#.*//' | xargs)
-                if [ -n "$pkg" ]; then
-                  echo "# CONFIG_PACKAGE_${pkg} is not set" >> immortalwrt/.config
-                  echo "  - ${pkg}"
-                fi
-              fi
-            done < "$PACKAGES_FILE"
-
-            # 解析禁用的子组件
-            echo ""
-            echo "禁用的子组件:"
-            in_components=false
+            section=""
             current_pkg=""
             while IFS= read -r line; do
-              # 检测 disable_components: 段落
-              if echo "$line" | grep -q "^disable_components:"; then
-                in_components=true
+              # 注释行与空行直接跳过（`# - pkg` 即表示临时停用该包）
+              case "$line" in
+                \#*|"") continue ;;
+              esac
+
+              # 子组件段里的包名（缩进键名，如 "  luci-app-passwall:"）
+              if [ "$section" = "disable_components" ] \
+                && printf '%s' "$line" | grep -qE '^[[:space:]]+[A-Za-z0-9_.+-]+:'; then
+                current_pkg=$(printf '%s' "$line" | sed 's/^[[:space:]]*//; s/:.*//' | xargs)
                 continue
               fi
-              # 检测包名（如 luci-app-passwall:）
-              if [ "$in_components" = true ] && echo "$line" | grep -qE "^[[:space:]]+[a-zA-Z].*:"; then
-                current_pkg=$(echo "$line" | sed 's/^[[:space:]]*//' | sed 's/:.*//' | xargs)
-                continue
-              fi
-              # 检测下一个顶级键（结束）
-              if echo "$line" | grep -q "^[a-zA-Z]" && ! echo "$line" | grep -q "^disable_components:"; then
-                in_components=false
+
+              # 顶格键名：切换当前段；未登记的段名按「无段」处理，其条目忽略
+              if printf '%s' "$line" | grep -qE '^[A-Za-z_][A-Za-z0-9_]*:'; then
+                section=$(printf '%s' "$line" | sed 's/:.*//')
                 current_pkg=""
+                case "$section" in
+                  enable)             echo ""; echo "启用的包:" ;;
+                  disable)            echo ""; echo "禁用的包:" ;;
+                  disable_components) echo ""; echo "禁用的子组件:" ;;
+                  *) section="" ;;
+                esac
                 continue
               fi
-              # 处理子组件（只认 "- " 列表行）
-              if [ "$in_components" = true ] && [ -n "$current_pkg" ] && echo "$line" | grep -qE '^[[:space:]]*- '; then
-                component=$(echo "$line" | sed 's/^[[:space:]]*- //' | sed 's/#.*//' | xargs)
-                if [ -n "$component" ]; then
-                  echo "# CONFIG_PACKAGE_${current_pkg}_${component} is not set" >> immortalwrt/.config
-                  echo "  - ${current_pkg}_${component}"
-                fi
-              fi
+
+              # 段内条目一律 "- 名称" 形式，其余行（说明文字等）忽略
+              printf '%s' "$line" | grep -qE '^[[:space:]]*- ' || continue
+              item=$(printf '%s' "$line" | sed 's/^[[:space:]]*- //' | sed 's/#.*//' | xargs)
+              [ -n "$item" ] || continue
+
+              case "$section" in
+                enable)
+                  echo "CONFIG_PACKAGE_${item}=y" >> immortalwrt/.config
+                  echo "  + ${item}"
+                  ;;
+                disable)
+                  echo "# CONFIG_PACKAGE_${item} is not set" >> immortalwrt/.config
+                  echo "  - ${item}"
+                  ;;
+                disable_components)
+                  [ -n "$current_pkg" ] || continue
+                  echo "# CONFIG_PACKAGE_${current_pkg}_${item} is not set" >> immortalwrt/.config
+                  echo "  - ${current_pkg}_${item}"
+                  ;;
+              esac
             done < "$PACKAGES_FILE"
           else
             echo "[INFO] 无 packages 配置文件，跳过"

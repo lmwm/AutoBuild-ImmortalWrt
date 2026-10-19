@@ -64,7 +64,7 @@
 | 项目 | 说明 |
 |------|------|
 | 运行时机 | 每周一 03:00 UTC 自动运行，也可手动触发 |
-| 行为 | 从上游拉取全部正式标签（排除 `-rc` 等预发布），取最新 8 个写入 `FullBuild.yml` 与 `ImageBuilder.yml` 的 `tag.options` |
+| 行为 | 从上游拉取全部正式标签（排除 `-rc` 等预发布），取最新 `KEEP_COUNT`（当前 4）个写入 `FullBuild.yml` 与 `ImageBuilder.yml` 的 `tag.options` |
 | 提交 | 仅在有变化时提交，提交信息为 `配置: 同步 ImmortalWrt 版本标签` |
 | 无变化 | 不产生任何提交 |
 
@@ -298,6 +298,9 @@ disable_components:
     - INCLUDE_Xray
 ```
 
+> 上面是**格式示例**，无需逐项对应实际配置；当前设备真正启用的包以
+> `Devices/Cudy TR3000/Device.yaml` 为准（`luci-app-oaf` 等已移除的包不要照抄进来）。
+
 > `usbutils` 提供 `lsusb` 命令，用于查看 USB 设备信息（调试 USB 网卡/RNDIS 时常用）。
 
 > **中文翻译的分包规则**：LuCI 翻译按包分发，`luci-i18n-base-zh-cn` 只覆盖
@@ -382,12 +385,16 @@ fi
 - **放在 `background/` 目录即可，不需要改主题代码**：Argon 的登录页模板 `ucode/template/themes/argon/sysauth.ut` 会用 `fetchMedia("/www/luci-static/argon/background/")` 列出该目录下所有图片/视频（`jpg jpeg png gif webp mp4 webm`）并**随机取一张**作为登录页背景；目录里只有一张就是它。这也是 LuCI「Argon 主题设置 → 上传背景」使用的同一个目录（该目录的读写权限由 `luci-app-argon-config` 的 ACL 授予）。
 - **壁纸来源要选「本地/内置」**：`luci-app-argon-config` 的 `/etc/config/argon` 默认值是 `option online_wallpaper 'bing'`（必应在线壁纸），此时本地图不会被使用。`99-cudy-tr3000-defaults` 会把它设为 `none`——即设置界面里的 **本地（Built-in）**。
 - 同一个文件也放在 `www/luci-static/argon/img/bg1.jpg`（Argon 写死的路径，用于图片加载失败时的 `data-fallback` 兜底、以及视频背景的 poster）。它内容同样是 PNG 原图，只是文件名沿用主题约定；浏览器按内容识别格式，渲染正常。
-- 生成文件体积：两个副本各 2.3 MB。想缩小体积可转成同尺寸 JPEG（约 1/5，肉眼无差），源图 `Wapper.png` 保留在工作区根目录。
+- 生成文件体积：两个副本各 2.3 MB。想缩小体积可转成同尺寸 JPEG（约 1/5，肉眼无差）；源图 `Wapper.png` 曾放在工作区根目录，**已不在仓库内**，需要重新生成请自备源图。
 - **主界面（登录后的 LuCI 页面）不走这套背景**：主题只为登录页渲染背景，`cascade.css` 里没有任何指向 `background/` 或 `img/bg1.jpg` 的规则，登录后的页面用主题色填充。
 
-#### OpenAppFilter 内核模块补丁（历史案例）
+#### OpenAppFilter 内核模块补丁（历史案例，已移除）
 
-`Build.sh`（原 `Packages.sh`）除了克隆 [OpenAppFilter](https://github.com/destan19/OpenAppFilter)，还会修补其 `oaf/Makefile`。
+> **现状（重要）**：`luci-app-oaf` 及相关克隆与补丁**已从本仓库移除**——
+> `Device.yaml` 中没有该包，`Build.sh` 中对应的 `git clone` 与 KCFLAGS 补丁
+> 也一并删除（脚本里只留一段说明性注释）。下面内容仅作历史背景，照抄不会生效。
+
+曾用于 [OpenAppFilter](https://github.com/destan19/OpenAppFilter)：`Build.sh`（原 `Packages.sh`）除了克隆它，还会修补其 `oaf/Makefile`。
 
 该仓库提供三个包，三者都启用才能工作：
 
