@@ -20,9 +20,7 @@ enable:
   # 各 luci-app / luci-mod-dashboard 需另装 luci-i18n-<名>-zh-cn，启用新应用时记得补上。
   - luci-i18n-base-zh-cn
   - luci-i18n-dashboard-zh-cn
-  - luci-i18n-mwan3-zh-cn
   - luci-i18n-ttyd-zh-cn
-  - luci-i18n-wol-zh-cn
   - luci-i18n-autoreboot-zh-cn
   # luci-i18n-openclash-zh-cn 在官方源中不存在，启用会让 make image 失败（2026-09-26 实测）
   #  - luci-i18n-openclash-zh-cn
@@ -36,12 +34,9 @@ enable:
 
   # LuCI 应用
   - luci-app-autoreboot
-  - luci-app-mwan3
   - luci-app-ttyd
   # - luci-app-upnp
-  - luci-app-wol
   - luci-app-openclash
-  - luci-app-harbor-file
   - luci-mod-dashboard
   - luci-app-argon-config
 
@@ -74,8 +69,11 @@ enable:
 
 # 禁用的包（本体）
 disable:
+  - luci-app-harbor-file
+  - luci-app-mwan3
   - luci-app-passwall
   - luci-app-rclone
+  - luci-app-wol
 
 # 禁用的子组件
 disable_components:
