@@ -1,58 +1,33 @@
-# Cudy TR3000 设备配置（唯一配置文件：设备参数 + 软件包列表）
-# 目录名：Devices/Cudy TR3000（与 device 下拉选项保持一致，保留空格）
-# 由 FullBuild.yml 的 [1.3] 与 [3.3] 读取；Build.sh 也读 Model / Model_dts 做 DTS 改名
-#
-# 结构约定（解析依赖，勿改动）：
-#   - 设备参数键（Model / Model_dts / Target）顶格书写、首字母大写
-#   - 软件包列表段（enable / disable / disable_components）放在文件最后
-#   - 段内条目一律 "  - 名称" 形式；注释行以 # 开头
-
-# ============================================================
-# 设备参数
-# ============================================================
+# Cudy TR3000 设备配置：设备参数 + 软件包列表，由 FullBuild.yml [1.3] 与 [3.3] 读取
+# （Build.sh 另读 Model / Model_dts 做 DTS 改名）。
+# 结构约定：参数键顶格书写；列表段放文件末尾；条目一律 "  - 名称" 形式。
 
 # 设备型号（用于固件命名与 Artifact 命名）
 Model: "Cudy TR3000"
 
-# DTS 中的原始型号名（dtb model 属性）
-# 由 Build.sh 的设备定制段把 DTS 里的此字符串替换为 Model，
-# 编译时生成 dtb，型号改名在 dtb 层生效（全链路自动正确）
-# 可选；缺失或与 Model 相同则跳过型号替换
+# DTS 中的原始型号名（dtb model 属性），可选；
+# Build.sh 会把它替换为 Model；缺失或与 Model 相同则跳过
 Model_dts: "Cudy TR3000 v1 (OpenWrt U-Boot layout)"
 
 # 设备 TARGET（用于 make defconfig）
 Target: "CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-v1-ubootmod=y"
 
-# ============================================================
-# 软件包配置（工作流据此生成 .config 与 packages_list.txt）
-# 依赖会由 make defconfig 自动处理
-# ============================================================
+# 软件包配置：工作流据此生成 .config，依赖由 make defconfig 自动处理
 
 # 启用的包
 enable:
-  # LuCI 中文支持
-  # LuCI 翻译按包分发：luci-i18n-base-zh-cn 覆盖 luci-base 的界面文案
-  # （核心模块 luci-mod-status / system / network 的字符串也收录在 base.po，
-  #   概览页"型号/主机名/固件版本"等即来自它，无独立语言包）；
-  # 各 luci-app 与 luci-mod-dashboard 的翻译是独立的 luci-i18n-<名>-zh-cn
-  # 包，不单独安装，对应页面就是英文。zh-cn 是 zh_Hans 的别名
-  # （luci.mk 的 LUCI_LC_ALIAS），指向同一个包。
-  # 注意：启用新的 luci-app 时记得同步补它的 luci-i18n-<名>-zh-cn。
+  # LuCI 翻译按包分发：luci-i18n-base-zh-cn 覆盖 luci-base 与核心模块文案，
+  # 各 luci-app / luci-mod-dashboard 需另装 luci-i18n-<名>-zh-cn，启用新应用时记得补上。
   - luci-i18n-base-zh-cn
   - luci-i18n-dashboard-zh-cn
   - luci-i18n-mwan3-zh-cn
   - luci-i18n-ttyd-zh-cn
   - luci-i18n-wol-zh-cn
   - luci-i18n-autoreboot-zh-cn
-  # luci-i18n-openclash-zh-cn 在官方源中不存在，禁止启用（启用会让
-  # make image 报 "no such package" 失败，2026-09-26 实测）：
-  # OpenClash 的 po 目录名是旧式 zh-cn，不在 luci.mk 的 LUCI_LANG 白名单
-  #（白名单只有 zh_Hans），官方构建不生成它的语言包。
-#  - luci-i18n-openclash-zh-cn
+  # luci-i18n-openclash-zh-cn 在官方源中不存在，启用会让 make image 失败（2026-09-26 实测）
+  #  - luci-i18n-openclash-zh-cn
   - luci-i18n-argon-config-zh-cn
-  # 下面两个是 luci 默认集应用（luci-app-firewall / luci-app-package-manager）
-  # 的翻译包：full 模式的 defconfig 会按 luci.mk 的 DEFAULT:=LUCI_LANG_*
-  # 自动带上，但仍显式列出，保证包的完整性不依赖上游默认值变化。
+  # luci 默认集应用的翻译，显式列出以免依赖上游默认值变化
   - luci-i18n-firewall-zh-cn
   - luci-i18n-package-manager-zh-cn
 
@@ -78,9 +53,7 @@ enable:
 
   # 内核模块
   - kmod-mtd-rw
-  # 内核 TLS 卸载模块。kmod-bonding 的条件依赖
-  # （DEPENDS:=PACKAGE_kmod-tls:kmod-tls）在 Makefile 里是条件依赖，
-  # defconfig 的 Kconfig 解析不会自动选中；显式列出让 bonding 具备 TLS 卸载能力。
+  # kmod-bonding 对 kmod-tls 是条件依赖，Kconfig 不会自动选中，故显式列出
   - kmod-tls
   - kmod-usb-net-cdc-ncm
   - kmod-usb-net-cdc-mbim
@@ -104,7 +77,7 @@ disable:
   - luci-app-passwall
   - luci-app-rclone
 
-# 禁用的子组件（按需添加）
+# 禁用的子组件
 disable_components:
   luci-app-passwall:
     - INCLUDE_Haproxy

@@ -1,17 +1,12 @@
 #!/usr/bin/env python3
-"""同步 ImmortalWrt 版本标签到编译工作流的下拉选项。
+"""把 ImmortalWrt 版本标签同步到编译工作流的 tag 下拉选项。
 
-由 .github/workflows/SyncVersions.yml 调用，对每个编译工作流各执行一次。
+workflow_dispatch 的 choice 选项不能运行时生成，只能由定时工作流改写文件
+（调用方：.github/workflows/SyncVersions.yml）。
 
-背景：GitHub Actions 的 workflow_dispatch 下拉选项（type: choice）必须静态写在
-工作流文件中，官方不支持运行时动态生成。因此用定时工作流改写 options 列表。
-
-用法：
-    python3 .github/scripts/SyncTags.py <工作流 yml 路径> <标签文件路径> [保留数量]
-
-标签文件每行一个标签，按版本从新到旧排列。
-支持的工作流文件见 EXPECTED_INPUTS_BY_FILE（按文件名登记各自的输入项集合）。
-当前仅登记 FullBuild.yml；ImageBuilder.yml 已于 2026-10-20 随快速组装模式一并移除。
+用法：python3 .github/scripts/SyncTags.py <工作流 yml> <标签文件> [保留数量]
+标签文件每行一个标签，从新到旧；支持的工作流见 EXPECTED_INPUTS_BY_FILE
+（当前仅 FullBuild.yml）。
 """
 
 import os
@@ -25,11 +20,8 @@ BLOCK_HEAD = '      tag:\n'
 OPTIONS_KEY = '        options:\n'
 ITEM_INDENT = '          '
 
-# 各工作流文件的输入项名称，用于校验更新后输入项集合未被改动。
-# 注意：此表必须与对应工作流的 workflow_dispatch.inputs 保持一致，
-#       增删输入项时需同步修改，否则本脚本会在写回校验时失败退出。
-#       键为工作流文件名（basename），值为该文件应有的全部输入项。
-# 当前只有全量编译工作流；ImageBuilder 模式已于 2026-10-20 移除。
+# 各工作流应有的 workflow_dispatch 输入项，增删输入项时必须同步本表。
+# 键为工作流文件名，值为该文件应有的全部输入项。
 EXPECTED_INPUTS_BY_FILE = {
     'FullBuild.yml': (
         'device',
@@ -67,8 +59,7 @@ def main() -> int:
     build_path, tags_path = sys.argv[1], sys.argv[2]
     keep = int(sys.argv[3]) if len(sys.argv) > 3 else 8
 
-    # 按文件名取该工作流应有输入项集合；未登记的文件直接拒绝，
-    # 避免写坏不认识的工作流（新工作流须先在 EXPECTED_INPUTS_BY_FILE 登记）。
+    # 未登记的工作流直接拒绝，避免写坏不认识的文件
     wf_name = os.path.basename(build_path)
     expected_inputs = EXPECTED_INPUTS_BY_FILE.get(wf_name)
     if expected_inputs is None:
@@ -126,9 +117,7 @@ def main() -> int:
         print('[ERROR] tag.default 被意外改动')
         return 1
 
-    # 双向校验输入项集合：既查丢失，也查新增/改名。
-    # 只查「丢失」会漏掉两类问题：新增输入项后忘记同步本表（漏检），
-    # 以及输入项被改名（旧名消失、新名出现，同样应显式暴露）。
+    # 双向校验：既查丢失，也查新增/改名（只查丢失会漏掉后两种情况）
     actual = set(inputs)
     expected = set(expected_inputs)
 

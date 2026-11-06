@@ -1,30 +1,10 @@
 #
-# 同步版本标签
-# 仓库：https://github.com/lmwm/AutoBuild-ImmortalWrt
+# 同步版本标签：定时从上游拉取正式标签，改写 FullBuild.yml 的 tag 下拉选项。
 #
-# 目的：让 FullBuild.yml 中 tag 的下拉选项保持最新，避免手动输入版本号出错。
-#
-# 背景：GitHub Actions 的 workflow_dispatch 下拉选项（type: choice）必须在
-#       工作流文件中静态列出，官方不支持在运行时动态生成。因此这里用定时
-#       工作流从上游拉取标签，自动改写编译工作流的 options。
-#
-# 行为：
-#   - 每周一 03:00 UTC 自动运行，也可手动触发
-#   - 拉取上游全部正式标签（排除 -rc 等预发布版本）
-#   - 保留最新的 KEEP_COUNT 个，重新写入编译工作流的 tag.options
-#   - 无变化则不做任何提交
-#   - 有变化则用 SYNC_TOKEN 直接提交推送
-#
-# 前置条件：仓库需配置 Secret「SYNC_TOKEN」（细粒度 PAT）
-#   GitHub 不允许默认 GITHUB_TOKEN 修改 .github/workflows/ 下的文件
-#   （防止 Actions 自我提权），故此步骤必须使用 PAT。
-#   权限：Contents 读写 + Workflows 读写。
-#   未配置时工作流会在 [4] 步骤输出配置指引并失败，不会静默跳过。
-#
-# 实际改写逻辑见 .github/scripts/SyncTags.py
-#
-# 注意：GitHub 对长期无活动的仓库会停用定时工作流。本仓库会持续触发编译，
-#       通常不会遇到；若发现下拉列表长期未更新，手动触发本工作流即可。
+# 每周一 03:00 UTC（北京时间 11:00）运行，也可手动触发；无变化不提交。
+# 前置条件：配置 Secret「SYNC_TOKEN」（细粒度 PAT，Contents + Workflows 读写）。
+# GitHub 禁止默认 GITHUB_TOKEN 修改 .github/workflows/ 下的文件，故必须用 PAT。
+# 改写逻辑见 .github/scripts/SyncTags.py。
 #
 
 name: "同步版本标签"
@@ -50,9 +30,8 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      # 使用 SYNC_TOKEN（细粒度 PAT）clone，使后续 push 具备改动
-      # .github/workflows/ 下文件所需的 workflows 权限。
-      # 未配置时回退为默认 GITHUB_TOKEN（此时 [4] 会给出配置指引）。
+      # 用 SYNC_TOKEN clone，后续 push 才具备改 .github/workflows/ 的权限；
+      # 未配置时回退 GITHUB_TOKEN（[4] 会给出配置指引）。
       - name: "[1] 克隆配置仓库"
         uses: actions/checkout@v4
         with:
@@ -68,7 +47,7 @@ jobs:
 
           for attempt in 1 2 3; do
             if git ls-remote --tags --sort=-v:refname "$UPSTREAM" > tags_raw.txt 2>/dev/null; then
-              # 只保留形如 v25.12.1 的正式版本，排除 -rc / -beta 等预发布
+              # 只保留 v25.12.1 这类正式版本，排除 -rc / -beta 等预发布
               grep -oP 'refs/tags/\Kv[0-9.]+$' tags_raw.txt | awk '!seen[$0]++' > tags.txt || true
               if [ -s tags.txt ]; then
                 echo "[OK] 标签获取成功（第 ${attempt} 次尝试）"
@@ -110,25 +89,8 @@ jobs:
             awk '/^      tag:/{f=1} f{print} f&&/^        default:/{exit}' ".github/workflows/$wf"
           done
 
-      # ----------------------------------------------------------
-      # [4] 提交变更
-      #
-      # 必须使用 SYNC_TOKEN（细粒度 PAT），不能用默认 GITHUB_TOKEN：
-      #   GitHub 禁止 GITHUB_TOKEN（GitHub App 身份）创建或修改
-      #   .github/workflows/ 下的文件，否则报：
-      #     refusing to allow a GitHub App to create or update workflow
-      #     `.github/workflows/AutoBuild.yml` without `workflows` permission
-      #   该限制已实测无法绕过：
-      #     - 在 permissions 块声明 workflows 无效（该权限名不在 schema 中）
-      #     - 将仓库 Actions 默认权限改为 Read and write 无效
-      #     - 推送到特性分支再开 PR 同样被拒
-      #   这是 GitHub 防止 Actions 自我提权的机制。
-      #
-      # SYNC_TOKEN 需为细粒度 PAT，权限：
-      #   Contents : Read and write
-      #   Workflows: Read and write
-      # 配置路径：仓库 Settings -> Secrets and variables -> Actions
-      # ----------------------------------------------------------
+      # SYNC_TOKEN 必须是细粒度 PAT（Contents + Workflows 读写）：
+      # GitHub 禁止 GITHUB_TOKEN 修改 .github/workflows/ 下的文件，该限制无法绕过。
       - name: "[4] 提交变更"
         env:
           SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
@@ -137,26 +99,18 @@ jobs:
           echo "  提交变更"
           echo "=========================================="
 
-          # ----------------------------------------------------------
-          # 防呆守卫：阻止将来的调试语句把 SYNC_TOKEN 写进公开日志
-          #
-          # 本仓库是 public，运行日志任何人可见。GitHub 只遮蔽「注册 secret
-          # 的原始值」，对拼接或编码后的派生值无效，所以最稳的做法是让这类
-          # 语句压根进不了执行路径。
-          #
-          # 实现说明：检查目标以变量拼接给出（而非字面量），因此这段守卫
-          # 代码本身不会撞上自己的检测规则。
-          # ----------------------------------------------------------
+          # 防呆守卫：public 仓库日志任何人可见，GitHub 只遮蔽原始 secret 值，
+          # 拼接/编码后的派生值仍会泄露；检查目标用变量拼接，避免守卫命中自身。
           SCRIPT_PATH="$GITHUB_WORKSPACE/.github/workflows/SyncVersions.yml"
           K_ENV="e""nv"
           K_PE="print""env"
           V_TOK='$''SYNC_TOKEN'
           V_GHT='$''GITHUB_TOKEN'
 
-          # 1) 立即关闭命令回显：即使有人为调试加了 set -x，此处强制关掉
+          # 1) 关闭命令回显（即使有人为调试加了 set -x）
           set +x
 
-          # 2) 静态检查所有 run 块（YAML 与 shell 的注释行均跳过）
+          # 2) 静态检查所有 run 块（YAML 与 shell 的注释行跳过）
           if awk -v e="$K_ENV" -v pe="$K_PE" -v tok="$V_TOK" -v ght="$V_GHT" '
             /^[[:space:]]*run:[[:space:]]*\|/ { inrun=1; next }
             inrun && !/^[[:space:]]/        { inrun=0 }
@@ -178,7 +132,7 @@ jobs:
             exit 1
           fi
 
-          # 3) 自检：确认 SYNC_TOKEN 已注入（只报长度，绝不回显内容）
+          # 3) 确认 SYNC_TOKEN 已注入（只报长度，绝不回显内容）
           if [ -n "$SYNC_TOKEN" ]; then
             echo "[OK] 凭据已注入（长度 ${#SYNC_TOKEN}）"
           fi
@@ -230,9 +184,8 @@ jobs:
 
           echo "[OK] 已提交，开始推送"
           for attempt in 1 2 3; do
-            # 注意：不能用 `if git push ... | sed ...`，那判断的是 sed 的退出码，
-            # 会把推送失败误判为成功。这里直接判断 git 的退出码。
-            # 凭证来自 [1] checkout 注入的 SYNC_TOKEN，无需在此重复传递。
+            # 直接判断 git 的退出码：`git push | sed` 会把 sed 的退出码当结果。
+            # 凭证来自 [1] checkout 注入的 SYNC_TOKEN，无需重复传递。
             if git push origin HEAD:main; then
               echo "[OK] 推送成功（第 ${attempt} 次尝试）"
               exit 0
@@ -243,4 +196,3 @@ jobs:
 
           echo "::error::推送失败，已重试 3 次"
           exit 1
-
