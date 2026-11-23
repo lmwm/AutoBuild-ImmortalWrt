@@ -25,7 +25,7 @@ on:
           - "v25.12.2"
           - "v25.12.1"
           - "v25.12.0"
-          - "v24.10.6"
+          - "v24.10.7"
         default: latest
         required: true
       cache_enabled:
