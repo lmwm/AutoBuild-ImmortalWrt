@@ -39,7 +39,7 @@ on:
       ruby_yjit:
         description: "启用 ruby YJIT（关闭可甩掉整个 Rust/LLVM 工具链，省 60-130 分钟）"
         type: boolean
-        default: true
+        default: false
 
 env:
   TZ: Asia/Shanghai
@@ -69,8 +69,18 @@ jobs:
           echo "[CPU]"
           CPU_MODEL=$(grep "model name" /proc/cpuinfo 2>/dev/null | head -1 | cut -d: -f2 | xargs)
           CPU_CORES=$(nproc 2>/dev/null || echo "未知")
+          # 当前频率：/proc/cpuinfo 的 cpu MHz（ARM 机器可能没有该字段）
+          CPU_MHZ=$(grep -m1 "cpu MHz" /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs)
+          # 最大频率：cpufreq（kHz → MHz）
+          CPU_MAX_KHZ=$(cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq 2>/dev/null)
           echo "  型号: ${CPU_MODEL:-未知}"
           echo "  核心: ${CPU_CORES} 核"
+          if [ -n "$CPU_MHZ" ]; then
+            echo "  当前频率: ${CPU_MHZ} MHz"
+          fi
+          if [ -n "$CPU_MAX_KHZ" ]; then
+            echo "  最大频率: $((CPU_MAX_KHZ / 1000)) MHz"
+          fi
           echo ""
 
           echo "[内存]"
@@ -79,7 +89,8 @@ jobs:
 
           echo "[磁盘]"
           echo "  工作目录: $GITHUB_WORKSPACE"
-          df -hT "$GITHUB_WORKSPACE" | awk 'NR==2 {printf "  文件系统: %s\n  总量: %s\n  已用: %s (%s)\n  可用: %s\n", $1, $2, $3, $5, $4}'
+          # df -hT 列: $1 文件系统 $2 类型 $3 总量 $4 已用 $5 可用 $6 使用率 $7 挂载点
+          df -hT "$GITHUB_WORKSPACE" | awk 'NR==2 {printf "  文件系统: %s (%s)\n  总量: %s\n  已用: %s (%s)\n  可用: %s\n  挂载点: %s\n", $1, $2, $3, $4, $6, $5, $7}'
           echo ""
 
           echo "=========================================="
@@ -518,7 +529,7 @@ jobs:
           echo "=========================================="
           echo "  编译后磁盘使用"
           echo "=========================================="
-          df -hT "$GITHUB_WORKSPACE" | awk 'NR==2 {printf "  可用: %s / %s (%s 已用)\n", $4, $2, $5}'
+          df -hT "$GITHUB_WORKSPACE" | awk 'NR==2 {printf "  可用: %s / %s (%s 已用, %s)\n", $5, $3, $4, $6}'
           echo "=========================================="
           echo ""
           echo "=========================================="
