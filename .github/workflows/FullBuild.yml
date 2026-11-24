@@ -67,12 +67,13 @@ jobs:
           echo ""
 
           echo "[CPU]"
-          CPU_MODEL=$(grep "model name" /proc/cpuinfo 2>/dev/null | head -1 | cut -d: -f2 | xargs)
+          CPU_MODEL=$(grep "model name" /proc/cpuinfo 2>/dev/null | head -1 | cut -d: -f2 | xargs || true)
           CPU_CORES=$(nproc 2>/dev/null || echo "未知")
-          # 当前频率：/proc/cpuinfo 的 cpu MHz（ARM 机器可能没有该字段）
-          CPU_MHZ=$(grep -m1 "cpu MHz" /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs)
-          # 最大频率：cpufreq（kHz → MHz）
-          CPU_MAX_KHZ=$(cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq 2>/dev/null)
+          # 当前频率：/proc/cpuinfo 的 cpu MHz（ARM / 虚拟机可能没有该字段）。
+          # 注意：run 默认启用 pipefail，grep 无匹配会让整条赋值返回非 0，故统一加 || true。
+          CPU_MHZ=$(grep -m1 "cpu MHz" /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs || true)
+          # 最大频率：cpufreq（kHz → MHz；虚拟机可能没有该文件）
+          CPU_MAX_KHZ=$(cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq 2>/dev/null || true)
           echo "  型号: ${CPU_MODEL:-未知}"
           echo "  核心: ${CPU_CORES} 核"
           if [ -n "$CPU_MHZ" ]; then
