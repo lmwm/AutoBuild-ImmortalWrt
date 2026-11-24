@@ -1,26 +1,48 @@
 #!/bin/sh
 # /etc/hotplug.d/iface/90-v6relay
-# 目的：WAN IPv6 链路抖动（WAN_LTE_IPV6 ifup）后，重建 odhcpd 的中继状态。
-# 背景：odhcpd 只在启动时设置 usb0 的 proxy_ndp 与 proxy NDP 条目；
-#       WAN_LTE_IPV6 ifup 会把这些内核状态清掉，odhcpd 不会自动重设，
-#       导致外网入站到 LAN 设备（FNOS 等）的 NDP 解析失败。
-# 触发记录：2026-11-24 12:22 WAN 抖动后 usb0 proxy_ndp=0、brORA 冻结在 116。
+# 目的：WAN 链路抖动（ifup）后，重建 odhcpd 的中继状态（WAN 设备的 proxy_ndp）。
+# 背景：odhcpd 只在启动时设置 proxy_ndp 与 proxy NDP 条目；
+#       WAN 设备重建后内核状态被清，odhcpd 不会自动重设，
+#       导致外网入站到 LAN 设备的 NDP 解析失败。
+#
+# 健壮性：不写死接口名 / 设备名。设备名按以下顺序解析：
+#   1) hotplug 事件提供的 $DEVICE
+#   2) uci network.$INTERFACE.device（忽略 @WAN 这类引用）
+#   3) ubus network.interface.$INTERFACE 的 l3_device
+#   4) 默认 IPv6 路由所在设备
+# 并以“该设备持有全局 IPv6 地址”判定它是 WAN（LAN 通常只有 link-local）。
 
 [ "$ACTION" = "ifup" ] || exit 0
-[ "$INTERFACE" = "WAN_LTE_IPV6" ] || exit 0
 
-# 后台执行，不阻塞 hotplug 队列
+DEV="$DEVICE"
+if [ -z "$DEV" ] && [ -n "$INTERFACE" ]; then
+    DEV=$(uci -q get "network.$INTERFACE.device" 2>/dev/null)
+    case "$DEV" in @*) DEV="" ;; esac
+fi
+if [ -z "$DEV" ] && [ -n "$INTERFACE" ]; then
+    DEV=$(ubus call "network.interface.$INTERFACE" status 2>/dev/null \
+          | sed -n 's/.*"l3_device": "\([^"]*\)".*/\1/p' | head -1)
+fi
+if [ -z "$DEV" ]; then
+    DEV=$(ip -6 route show default 2>/dev/null | sed -n 's/.*dev \([^ ]*\).*/\1/p' | head -1)
+fi
+[ -z "$DEV" ] && exit 0
+[ -d "/proc/sys/net/ipv6/conf/$DEV" ] || exit 0
+
+# 只处理持有全局 IPv6 的设备（WAN）
+ip -6 addr show dev "$DEV" 2>/dev/null | grep -q 'scope global' || exit 0
+
+PN=$(cat "/proc/sys/net/ipv6/conf/$DEV/proxy_ndp" 2>/dev/null)
+if [ "$PN" = "1" ]; then
+    logger -t v6relay "$DEV proxy_ndp=1 after ifup; nothing to do"
+    exit 0
+fi
+
+logger -t v6relay "$DEV proxy_ndp=$PN after ifup; restarting odhcpd"
 (
     sleep 3
-    PN=$(cat /proc/sys/net/ipv6/conf/usb0/proxy_ndp 2>/dev/null)
-    if [ "$PN" != "1" ]; then
-        logger -t v6relay "usb0 proxy_ndp=$PN after WAN_LTE_IPV6 ifup; restarting odhcpd"
-        /etc/init.d/odhcpd restart
-        sleep 2
-        PN2=$(cat /proc/sys/net/ipv6/conf/usb0/proxy_ndp 2>/dev/null)
-        logger -t v6relay "after restart: proxy_ndp=$PN2"
-    else
-        logger -t v6relay "usb0 proxy_ndp=1 after WAN_LTE_IPV6 ifup; nothing to do"
-    fi
+    /etc/init.d/odhcpd restart
+    sleep 2
+    logger -t v6relay "after restart: $DEV proxy_ndp=$(cat /proc/sys/net/ipv6/conf/$DEV/proxy_ndp 2>/dev/null)"
 ) &
 exit 0
