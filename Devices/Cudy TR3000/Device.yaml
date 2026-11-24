@@ -46,6 +46,10 @@ enable:
   - openssh-sftp-server
   - usbutils
 
+  # MBIM 拨号（路由器直接拨号用；需 CPE 侧切到 MBIM 组合）
+  - umbim
+  - luci-proto-mbim
+
   # 内核模块
   - kmod-mtd-rw
   # kmod-bonding 对 kmod-tls 是条件依赖，Kconfig 不会自动选中，故显式列出

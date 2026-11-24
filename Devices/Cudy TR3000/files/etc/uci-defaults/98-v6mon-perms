@@ -1,0 +1,5 @@
+#!/bin/sh
+# 确保自愈脚本可执行（files/ 的权限位在个别构建环境可能丢失）
+chmod +x /etc/hotplug.d/iface/90-v6relay 2>/dev/null
+chmod +x /root/v6mon/w.sh 2>/dev/null
+exit 0

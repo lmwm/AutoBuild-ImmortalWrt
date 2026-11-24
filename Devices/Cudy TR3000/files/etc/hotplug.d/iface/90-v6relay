@@ -1,0 +1,26 @@
+#!/bin/sh
+# /etc/hotplug.d/iface/90-v6relay
+# 目的：WAN IPv6 链路抖动（WAN_LTE_IPV6 ifup）后，重建 odhcpd 的中继状态。
+# 背景：odhcpd 只在启动时设置 usb0 的 proxy_ndp 与 proxy NDP 条目；
+#       WAN_LTE_IPV6 ifup 会把这些内核状态清掉，odhcpd 不会自动重设，
+#       导致外网入站到 LAN 设备（FNOS 等）的 NDP 解析失败。
+# 触发记录：2026-11-24 12:22 WAN 抖动后 usb0 proxy_ndp=0、brORA 冻结在 116。
+
+[ "$ACTION" = "ifup" ] || exit 0
+[ "$INTERFACE" = "WAN_LTE_IPV6" ] || exit 0
+
+# 后台执行，不阻塞 hotplug 队列
+(
+    sleep 3
+    PN=$(cat /proc/sys/net/ipv6/conf/usb0/proxy_ndp 2>/dev/null)
+    if [ "$PN" != "1" ]; then
+        logger -t v6relay "usb0 proxy_ndp=$PN after WAN_LTE_IPV6 ifup; restarting odhcpd"
+        /etc/init.d/odhcpd restart
+        sleep 2
+        PN2=$(cat /proc/sys/net/ipv6/conf/usb0/proxy_ndp 2>/dev/null)
+        logger -t v6relay "after restart: proxy_ndp=$PN2"
+    else
+        logger -t v6relay "usb0 proxy_ndp=1 after WAN_LTE_IPV6 ifup; nothing to do"
+    fi
+) &
+exit 0
