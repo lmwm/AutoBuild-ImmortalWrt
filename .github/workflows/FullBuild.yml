@@ -48,7 +48,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     name: "编译固件"
-    timeout-minutes: 360
+    timeout-minutes: 480
 
     steps:
       # 阶段 1: 系统环境初始化
@@ -421,6 +421,7 @@ jobs:
         run: make defconfig
 
       - name: "[3.7] 修复 Rust LLVM CI 下载"
+        if: ${{ inputs.ruby_yjit }}
         run: |
           RUST_MAKEFILE="immortalwrt/feeds/packages/lang/rust/Makefile"
           if [ -f "$RUST_MAKEFILE" ]; then
@@ -465,7 +466,7 @@ jobs:
             echo "[OK] 编译成功（多线程）"
           else
             echo "[WARN] 多线程编译失败（退出码 $build_rc），降级单线程重试"
-            make -j1 2>&1 | tee "$BUILD_LOG"
+            make -j1 2>&1 | tee -a "$BUILD_LOG"
             build_rc=${PIPESTATUS[0]}
             if [ "$build_rc" -eq 0 ]; then
               echo "[OK] 编译成功（单线程重试）"
@@ -473,7 +474,7 @@ jobs:
               echo "[ERROR] 多线程与单线程均失败（退出码 $build_rc），失败日志末尾:"
               tail -n 200 "$BUILD_LOG" || true
               echo "[ERROR] 以下为 V=s 详细日志（仅保留末尾 200 行）"
-              make -j1 V=s 2>&1 | tee "$BUILD_LOG" | tail -n 200
+              make -j1 V=s 2>&1 | tee -a "$BUILD_LOG" | tail -n 200
               echo "::error::固件编译失败，详见上方 V=s 日志"
               exit 1
             fi
@@ -494,6 +495,22 @@ jobs:
           fi
 
           echo "status=success" >> $GITHUB_OUTPUT
+
+      - name: "[4.2.1] 上传失败构建日志"
+        if: failure() && !inputs.skip_compile
+        uses: actions/upload-artifact@v4
+        with:
+          name: "build-log-${{ github.run_id }}"
+          path: ${{ runner.temp }}/build.log
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: "[4.2.2] 失败时保存 ccache（加速重试）"
+        if: failure() && inputs.cache_enabled && !inputs.skip_compile
+        uses: actions/cache/save@v4
+        with:
+          path: immortalwrt/.ccache
+          key: ccache-${{ runner.os }}-${{ steps.device.outputs.platform }}-${{ steps.version.outputs.tag }}-cc2-failed-${{ github.run_id }}
 
       - name: "[4.3] 编译后磁盘使用"
         if: ${{ !inputs.skip_compile && !cancelled() }}
