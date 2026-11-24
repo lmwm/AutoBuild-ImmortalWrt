@@ -69,13 +69,8 @@ jobs:
           echo "[CPU]"
           CPU_MODEL=$(grep "model name" /proc/cpuinfo 2>/dev/null | head -1 | cut -d: -f2 | xargs || true)
           CPU_CORES=$(nproc 2>/dev/null || echo "未知")
-          # 当前频率：优先 /proc/cpuinfo 的 cpu MHz，回退 lscpu。
-          # 注意：run 默认启用 pipefail，grep 无匹配会让整条赋值返回非 0，故统一加 || true。
-          CPU_MHZ=$(grep -m1 "cpu MHz" /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs || true)
-          if [ -z "$CPU_MHZ" ]; then
-            CPU_MHZ=$(lscpu 2>/dev/null | sed -n 's/^CPU MHz:[[:space:]]*//p' | head -1 || true)
-          fi
           # 最大频率：优先 cpufreq（kHz → MHz），回退 lscpu 的 CPU max MHz。
+          # 注意：run 默认启用 pipefail，grep 无匹配会让整条赋值返回非 0，故加 || true。
           CPU_MAX_KHZ=$(cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq 2>/dev/null || true)
           if [ -n "$CPU_MAX_KHZ" ]; then
             CPU_MAX_MHZ=$((CPU_MAX_KHZ / 1000))
@@ -84,22 +79,19 @@ jobs:
           fi
           echo "  型号: ${CPU_MODEL:-未知}"
           echo "  核心: ${CPU_CORES} 核"
-          if [ -n "$CPU_MHZ" ]; then
-            echo "  当前频率: ${CPU_MHZ} MHz"
-          fi
           if [ -n "$CPU_MAX_MHZ" ]; then
             echo "  最大频率: ${CPU_MAX_MHZ} MHz"
           fi
           echo ""
 
           echo "[内存]"
-          free -h | awk '/^Mem:/ {printf "  总量: %s\n  已用: %s\n  可用: %s\n", $2, $3, $7}'
+          free -h | awk 'function u(v){return (v ~ /B$/) ? v : v "B"} /^Mem:/ {printf "  总量: %s\n  已用: %s\n  可用: %s\n", u($2), u($3), u($7)}'
           echo ""
 
           echo "[磁盘]"
           echo "  工作目录: $GITHUB_WORKSPACE"
           # df -hT 列: $1 文件系统 $2 类型 $3 总量 $4 已用 $5 可用 $6 使用率 $7 挂载点
-          df -hT "$GITHUB_WORKSPACE" | awk 'NR==2 {printf "  文件系统: %s (%s)\n  总量: %s\n  已用: %s (%s)\n  可用: %s\n  挂载点: %s\n", $1, $2, $3, $4, $6, $5, $7}'
+          df -hT "$GITHUB_WORKSPACE" | awk 'function u(v){return (v ~ /B$/) ? v : v "B"} NR==2 {printf "  文件系统: %s (%s)\n  总量: %s\n  已用: %s (%s)\n  可用: %s\n  挂载点: %s\n", $1, $2, u($3), u($4), $6, u($5), $7}'
           echo ""
 
           echo "=========================================="
@@ -121,9 +113,9 @@ jobs:
           fi
 
           # 值可能带空格，用 sed 而非 awk；'^Model:' 不会误匹配 '^Model_dts:'
-          DEVICE_MODEL=$(grep '^Model:' "$CONF" | sed 's/^Model: *//' | tr -d '"' | tr -d "'")
-          MODEL_DTS=$(grep '^Model_dts:' "$CONF" | sed 's/^Model_dts: *//' | tr -d '"' | tr -d "'")
-          DEVICE_TARGET=$(grep '^Target:' "$CONF" | sed 's/^Target: *//' | tr -d '"' | tr -d "'")
+          DEVICE_MODEL=$(grep '^Model:' "$CONF" | sed 's/^Model: *//' | tr -d '"' | tr -d "'" || true)
+          MODEL_DTS=$(grep '^Model_dts:' "$CONF" | sed 's/^Model_dts: *//' | tr -d '"' | tr -d "'" || true)
+          DEVICE_TARGET=$(grep '^Target:' "$CONF" | sed 's/^Target: *//' | tr -d '"' | tr -d "'" || true)
 
           if [ -z "$DEVICE_MODEL" ] || [ -z "$DEVICE_TARGET" ]; then
             echo "::error::${CONF} 缺少 Model 或 Target 字段"
@@ -426,7 +418,7 @@ jobs:
             if [ -f "$RUBY_MK" ]; then
               awk '/config RUBY_ENABLE_YJIT/{f=1} f&&/default y/{sub(/default y/,"default n");f=0} {print}' "$RUBY_MK" > "$RUBY_MK.tmp" && mv "$RUBY_MK.tmp" "$RUBY_MK"
               echo "[OK] RUBY_ENABLE_YJIT 默认值已改为 n:"
-              grep -A6 'config RUBY_ENABLE_YJIT' "$RUBY_MK" | grep -E 'config RUBY|default' | sed 's|^|  |'
+              grep -A6 'config RUBY_ENABLE_YJIT' "$RUBY_MK" | grep -E 'config RUBY|default' | sed 's|^|  |' || true
             else
               echo "[WARN] 未找到 $RUBY_MK，仅在 .config 中禁用"
             fi
@@ -447,7 +439,7 @@ jobs:
           if [ -f "$RUST_MAKEFILE" ]; then
             sed -i 's/--set=llvm\.download-ci-llvm=true/--set=llvm.download-ci-llvm=false/' "$RUST_MAKEFILE"
             echo "[OK] 已禁用 download-ci-llvm"
-            grep 'download-ci-llvm' "$RUST_MAKEFILE"
+            grep 'download-ci-llvm' "$RUST_MAKEFILE" || true
           else
             echo "[WARN] Rust Makefile 不存在: $RUST_MAKEFILE"
           fi
@@ -538,7 +530,7 @@ jobs:
           echo "=========================================="
           echo "  编译后磁盘使用"
           echo "=========================================="
-          df -hT "$GITHUB_WORKSPACE" | awk 'NR==2 {printf "  可用: %s / %s (%s 已用, %s)\n", $5, $3, $4, $6}'
+          df -hT "$GITHUB_WORKSPACE" | awk 'function u(v){return (v ~ /B$/) ? v : v "B"} NR==2 {printf "  可用: %s / %s (%s 已用, %s)\n", u($5), u($3), u($4), $6}'
           echo "=========================================="
           echo ""
           echo "=========================================="
@@ -546,7 +538,9 @@ jobs:
           echo "=========================================="
           for d in immortalwrt/staging_dir immortalwrt/build_dir immortalwrt/dl immortalwrt/.ccache; do
             if [ -d "$d" ]; then
-              printf "  %-24s %-8s (%s 个文件)\n" "$d" "$(du -sh "$d" 2>/dev/null | cut -f1)" "$(find "$d" -type f 2>/dev/null | wc -l)"
+              sz=$(du -sh "$d" 2>/dev/null | cut -f1 || true)
+              case "$sz" in ""|*B) ;; *) sz="${sz}B" ;; esac
+              printf "  %-24s %-8s (%s 个文件)\n" "$d" "$sz" "$(find "$d" -type f 2>/dev/null | wc -l)"
             else
               printf "  %-24s %s\n" "$d" "(不存在)"
             fi
