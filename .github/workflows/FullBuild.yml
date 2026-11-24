@@ -432,18 +432,6 @@ jobs:
         working-directory: immortalwrt
         run: make defconfig
 
-      - name: "[3.7] 修复 Rust LLVM CI 下载"
-        if: ${{ inputs.ruby_yjit }}
-        run: |
-          RUST_MAKEFILE="immortalwrt/feeds/packages/lang/rust/Makefile"
-          if [ -f "$RUST_MAKEFILE" ]; then
-            sed -i 's/--set=llvm\.download-ci-llvm=true/--set=llvm.download-ci-llvm=false/' "$RUST_MAKEFILE"
-            echo "[OK] 已禁用 download-ci-llvm"
-            grep 'download-ci-llvm' "$RUST_MAKEFILE" || true
-          else
-            echo "[WARN] Rust Makefile 不存在: $RUST_MAKEFILE"
-          fi
-
       # 阶段 4: 编译固件
 
       - name: "[4.1] 预下载资源"
