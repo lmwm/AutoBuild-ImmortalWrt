@@ -69,18 +69,26 @@ jobs:
           echo "[CPU]"
           CPU_MODEL=$(grep "model name" /proc/cpuinfo 2>/dev/null | head -1 | cut -d: -f2 | xargs || true)
           CPU_CORES=$(nproc 2>/dev/null || echo "未知")
-          # 当前频率：/proc/cpuinfo 的 cpu MHz（ARM / 虚拟机可能没有该字段）。
+          # 当前频率：优先 /proc/cpuinfo 的 cpu MHz，回退 lscpu。
           # 注意：run 默认启用 pipefail，grep 无匹配会让整条赋值返回非 0，故统一加 || true。
           CPU_MHZ=$(grep -m1 "cpu MHz" /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs || true)
-          # 最大频率：cpufreq（kHz → MHz；虚拟机可能没有该文件）
+          if [ -z "$CPU_MHZ" ]; then
+            CPU_MHZ=$(lscpu 2>/dev/null | sed -n 's/^CPU MHz:[[:space:]]*//p' | head -1 || true)
+          fi
+          # 最大频率：优先 cpufreq（kHz → MHz），回退 lscpu 的 CPU max MHz。
           CPU_MAX_KHZ=$(cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq 2>/dev/null || true)
+          if [ -n "$CPU_MAX_KHZ" ]; then
+            CPU_MAX_MHZ=$((CPU_MAX_KHZ / 1000))
+          else
+            CPU_MAX_MHZ=$(lscpu 2>/dev/null | sed -n 's/^CPU max MHz:[[:space:]]*//p' | head -1 || true)
+          fi
           echo "  型号: ${CPU_MODEL:-未知}"
           echo "  核心: ${CPU_CORES} 核"
           if [ -n "$CPU_MHZ" ]; then
             echo "  当前频率: ${CPU_MHZ} MHz"
           fi
-          if [ -n "$CPU_MAX_KHZ" ]; then
-            echo "  最大频率: $((CPU_MAX_KHZ / 1000)) MHz"
+          if [ -n "$CPU_MAX_MHZ" ]; then
+            echo "  最大频率: ${CPU_MAX_MHZ} MHz"
           fi
           echo ""
 
