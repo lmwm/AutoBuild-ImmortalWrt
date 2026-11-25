@@ -124,7 +124,7 @@
   [3.5] 恢复源码下载缓存（可选）
   [3.5.1] 配置 ccache 校验方式（可选）
   [3.6] 同步配置（make defconfig）
-  [3.7] 修复 Rust LLVM CI 下载（无条件执行）
+  [3.7] 修复 Rust LLVM 来源（无条件执行；禁 CI 下载 + 指向系统 LLVM）
 
 阶段 4: 编译固件
   [4.1] 预下载资源
@@ -194,8 +194,12 @@ ruby 的 `RUBY_ENABLE_YJIT` 在 aarch64 上默认开启，而 YJIT 是用 Rust �
 与 `[3.5.2]` 步骤，保持上游默认。
 
 - 代价：每次全量都要编 `rust/host`，冷缓存约 4 小时 52 分（job 超时上限 480 分钟）；
-- `[3.7]` 因此改为**无条件执行**：把 rust Makefile 的 `--set=llvm.download-ci-llvm=true` 改成 `false`，
-  否则会去 rust CI 拉预编译 LLVM 并拿到 404（run `45495817180` 三级重试全败）；
+- `[3.7]` 因此改为**无条件执行**，做两件事：①把 rust Makefile 的 `--set=llvm.download-ci-llvm=true`
+  改成 `false`（该 CI 产物已被删除，S3 返回 404 + `x-amz-delete-marker`，run `45495817180` 三级重试全败）；
+  ②追加 `--set=target.x86_64-unknown-linux-gnu.llvm-config=<系统 llvm-config>`。因为 bootstrap 的
+  LLVM 来源优先级是「外部 llvm-config > CI 下载 > 源码构建」，只置 `false` 会回退到源码编译 LLVM、
+  多出约 2 小时；指向系统 LLVM 则直接跳过（`llvm-config` 由 `llvm-dev` 提供，`[2.1]` 已装）。
+  **改用系统 LLVM 后的实际耗时待实测确认**；
 - 若将来要甩掉 Rust 工具链：必须在 `[3.6]` defconfig **之前**改
   `feeds/packages/lang/ruby/Makefile` 的 `default y` 为 `default n`，并在 `.config` 写入
   `# CONFIG_RUBY_ENABLE_YJIT is not set`（依赖解析发生在 defconfig，晚了拦不住 `rust/host`）。
