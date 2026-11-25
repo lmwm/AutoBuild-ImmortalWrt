@@ -36,10 +36,6 @@ on:
         description: "跳过编译（调试模式）"
         type: boolean
         default: false
-      ruby_yjit:
-        description: "启用 ruby YJIT（关闭可甩掉整个 Rust/LLVM 工具链，省 60-130 分钟）"
-        type: boolean
-        default: false
 
 env:
   TZ: Asia/Shanghai
@@ -398,35 +394,22 @@ jobs:
           echo "[缓存] ccache 配置:"
           cat immortalwrt/.ccache/ccache.conf
 
-      # ruby_yjit=false：defconfig 之前改 Makefile 默认值并在 .config 显式禁用，
-      # 避免依赖解析拉入 Rust/LLVM 工具链（实测 ruby+rust 约占 77% 编译时间）。
-      - name: "[3.5.2] 配置 ruby YJIT"
-        run: |
-          if [ "${{ inputs.ruby_yjit }}" = "false" ]; then
-            RUBY_MK="immortalwrt/feeds/packages/lang/ruby/Makefile"
-            if [ -f "$RUBY_MK" ]; then
-              awk '/config RUBY_ENABLE_YJIT/{f=1} f&&/default y/{sub(/default y/,"default n");f=0} {print}' "$RUBY_MK" > "$RUBY_MK.tmp" && mv "$RUBY_MK.tmp" "$RUBY_MK"
-              echo "[OK] RUBY_ENABLE_YJIT 默认值已改为 n:"
-              grep -A6 'config RUBY_ENABLE_YJIT' "$RUBY_MK" | grep -E 'config RUBY|default' | sed 's|^|  |' || true
-            else
-              echo "[WARN] 未找到 $RUBY_MK，仅在 .config 中禁用"
-            fi
-            echo "# CONFIG_RUBY_ENABLE_YJIT is not set" >> immortalwrt/.config
-            echo "[OK] 已禁用 ruby YJIT（不再拉入 Rust/LLVM 工具链）"
-          else
-            echo "[INFO] ruby YJIT 保持启用（需要 Rust/LLVM 工具链，约 60-130 分钟）"
-          fi
-
+      # ruby YJIT 不再由工作流覆盖（2026-11-26 决定）：ruby 是 luci-app-openclash 的硬依赖，
+      # 其脚本（启动校验、订阅处理、分组/规则编辑、覆盖脚本）大量依赖 ruby + YAML，
+      # 所以不去动 ruby 的编译配置，维持上游默认（RUBY_ENABLE_YJIT default y）——
+      # 代价是 rust/host 每次都会进依赖图，全量编译多出约 2 小时。
+      # 若将来要甩掉 Rust 工具链：在 defconfig 之前把 Makefile 的 default y 改成 n，
+      # 并在 .config 写入 `# CONFIG_RUBY_ENABLE_YJIT is not set`（晚于 defconfig 拦不住）。
       - name: "[3.6] 同步配置 (defconfig)"
         working-directory: immortalwrt
         run: make defconfig
 
-      # ruby_yjit=true 时 rust/host 默认 --set=llvm.download-ci-llvm=true，会去 rust CI
-      # 拉预编译 LLVM；该地址在 Actions 上返回 404（实测 run 45495817180 三级重试全败）。
+      # rust/host 默认 --set=llvm.download-ci-llvm=true，会去 rust CI 拉预编译 LLVM，
+      # 该地址在 Actions 上返回 404（实测 run 45495817180 多线程/单线程/V=s 三级重试全败）。
       # 改为 false 后实测可成功构建（run 45388406468，含 Rust/LLVM 的整轮 4h52m）。
-      # 注意：该步骤只在 ruby_yjit=true 时执行——ruby_yjit=false 时 rust 不进依赖，不必改。
+      # YJIT 已不再关闭（rust 每次都会编），故本步骤无条件执行；若 rust 不在依赖图里
+      # Makefile 不存在，只告警不失败。
       - name: "[3.7] 修复 Rust LLVM CI 下载"
-        if: ${{ inputs.ruby_yjit }}
         run: |
           RUST_MAKEFILE="immortalwrt/feeds/packages/lang/rust/Makefile"
           if [ -f "$RUST_MAKEFILE" ]; then

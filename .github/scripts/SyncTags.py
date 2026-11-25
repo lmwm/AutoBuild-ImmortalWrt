@@ -28,7 +28,6 @@ EXPECTED_INPUTS_BY_FILE = {
         'tag',
         'cache_enabled',
         'skip_compile',
-        'ruby_yjit',
     ),
 }
 

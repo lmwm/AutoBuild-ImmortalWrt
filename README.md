@@ -48,7 +48,6 @@
 | `tag` | ImmortalWrt 版本标签（下拉选择） | `latest` |
 | `cache_enabled` | 启用编译缓存（ccache + 源码下载 dl） | `true` |
 | `skip_compile` | 跳过编译（调试模式；同时跳过缓存恢复/保存，防止空缓存占住缓存键） | `false` |
-| `ruby_yjit` | 启用 ruby YJIT（关闭可甩掉整个 Rust/LLVM 工具链，省 60–130 分钟） | `true` |
 
 ### 版本标签（下拉选择，自动同步）
 
@@ -80,7 +79,7 @@
 
 - **已不再缓存构建树**（`build_dir` + `staging_dir`）。此前那份缓存单独就有 **10.24GB**，超出 GitHub 每仓库 10GB 的配额，会把 ccache 与 dl 一起挤掉；保存一次要 6.5 分钟；而且其配套的 `[5.6]` 裁剪用 `-name 'core.*'` 误删了内核源码里的 `core.h`（`include/net/netns/core.h`），使下一次全量编译恢复该缓存后**必然报错失败**。因此构建树缓存连同配套的 `[2.7]` 时间戳重置、`[5.6]` 裁剪、`[5.7]` 保存一并移除
 - **`FullBuild.yml` 是纯全量编译**：每次从零编译，不再有「增量命中后 15-30 分钟」这一档。加速完全由 ccache 承担——它按 `系统-平台-版本-compiler_check 版本`（当前末尾为 `-cc2`）分键，同平台同版本精确命中；跨版本保留 `restore-keys`，因为 ccache 用源码与命令行哈希校验，版本不符只会失效、不会用错
-- **实测基线**（v25.12.2）：首次全量约 2 小时 51 分，其中 `feeds/packages/lang/ruby`（OpenClash 依赖）独占约 106 分钟——**这类不走 ccache 的巨包无法被 ccache 加速**，是全量编译的主要耗时来源。想缩短全量编译耗时请用 `ruby_yjit=false`（见下文）
+- **实测基线**（v25.12.2，冷缓存）：不干预 YJIT 时整轮 4 小时 52 分（run `45388406468`），关掉 YJIT 时 2 小时 41 分（run `45492418518`），差值约 2 小时 11 分就是 `rust/host` 工具链。`feeds/packages/lang/ruby` 与 `rust/host` **不走 ccache**，缓存对这段无效。工作流现不再关闭 YJIT（见下文「ruby YJIT」）
 - dl 按 `系统-平台-版本` 分键且**不跨版本复用**：dl 里是未校验的压缩包，跨版本混用可能导致某个包源码与目标版本不匹配而报校验失败。代价是每个版本各存一份
 - 两个缓存都带平台维度，将来新增不同平台的设备时不会互相污染
 - GitHub 单个缓存上限 10GB（所有缓存条目共享，超出按 LRU 淘汰）；若提示超限，编译不受影响，仅本次不保存对应缓存。`[4.3]` 会打印各构建目录的精确体积
@@ -124,9 +123,8 @@
   [3.4] 恢复 ccache 缓存（可选）
   [3.5] 恢复源码下载缓存（可选）
   [3.5.1] 配置 ccache 校验方式（可选）
-  [3.5.2] 配置 ruby YJIT（ruby_yjit=false 时禁用，甩掉 Rust 工具链）
   [3.6] 同步配置（make defconfig）
-  [3.7] 修复 Rust LLVM
+  [3.7] 修复 Rust LLVM CI 下载（无条件执行）
 
 阶段 4: 编译固件
   [4.1] 预下载资源
@@ -184,16 +182,23 @@ dtb 的 model 属性
 - `[4.2]` 编译失败时会把构建日志末尾与 `V=s` 详细日志打印出来，不会静默失败
 - `[5.1]` 会校验固件产物目录存在；`[5.5]` 上传整个 `bin` 目录（含安装包与 manifest）
 
-### ruby YJIT 开关（`ruby_yjit`）
+### ruby YJIT（不再由工作流覆盖，2026-11-26）
 
-`luci-app-openclash` 依赖 `ruby`，而 ruby 的 `RUBY_ENABLE_YJIT` 在 aarch64 上默认开启；YJIT 是用 Rust 实现的 JIT 编译器，其构建依赖 `PKG_BUILD_DEPENDS: RUBY_ENABLE_YJIT:rust/host`，会拉入整个 Rust/LLVM 工具链。实测 **ruby + rust 合计占编译时间约 77%**（ruby 131 分钟 + rust 与其并行）。
+`luci-app-openclash` 硬依赖 `ruby` + `ruby-yaml`，且其脚本大量用到它们：启动前的配置校验
+（`config_check`，ruby 失败直接 `start_fail`）、订阅更新时的校验与节点筛选、界面上的分组/规则编辑、
+自定义覆盖脚本、看门狗跳过地址等。**因此不能去掉 ruby**，工作流也不再改它的编译配置。
 
-OpenClash 只用 ruby 跑订阅规则转换等一次性短脚本，JIT 加速没有收益。把 `ruby_yjit` 设为 `false` 后，`[3.5.2]` 会：
+ruby 的 `RUBY_ENABLE_YJIT` 在 aarch64 上默认开启，而 YJIT 是用 Rust 实现的，其构建依赖
+`PKG_BUILD_DEPENDS: RUBY_ENABLE_YJIT:rust/host`，会把整个 Rust/LLVM 工具链拉进构建图。
+早期版本用 `ruby_yjit=false` 关掉它省时间；**2026-11-26 起取消该覆盖**——删除 `ruby_yjit` 输入项
+与 `[3.5.2]` 步骤，保持上游默认。
 
-1. 把 `feeds/packages/lang/ruby/Makefile` 中 `RUBY_ENABLE_YJIT` 的 `default y` 改为 `default n`
-2. 在 `.config` 显式写入 `# CONFIG_RUBY_ENABLE_YJIT is not set`
-
-两者都必须在 `[3.6]` defconfig **之前**完成——依赖解析发生在 defconfig，晚了就拦不住 `rust/host` 被拉入构建图。
+- 代价：每次全量都要编 `rust/host`，冷缓存约 4 小时 52 分（job 超时上限 480 分钟）；
+- `[3.7]` 因此改为**无条件执行**：把 rust Makefile 的 `--set=llvm.download-ci-llvm=true` 改成 `false`，
+  否则会去 rust CI 拉预编译 LLVM 并拿到 404（run `45495817180` 三级重试全败）；
+- 若将来要甩掉 Rust 工具链：必须在 `[3.6]` defconfig **之前**改
+  `feeds/packages/lang/ruby/Makefile` 的 `default y` 为 `default n`，并在 `.config` 写入
+  `# CONFIG_RUBY_ENABLE_YJIT is not set`（依赖解析发生在 defconfig，晚了拦不住 `rust/host`）。
 
 ## 配置文件说明
 
