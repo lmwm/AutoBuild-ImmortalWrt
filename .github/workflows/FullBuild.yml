@@ -145,9 +145,11 @@ jobs:
           echo "  安装编译环境"
           echo "=========================================="
 
-          sudo apt-get update -y
+          # 加 Retries/超时：apt 源偶发抖动不该让整轮几小时的构建在第一步就失败
+          sudo apt-get update -y -o Acquire::Retries=3
 
           sudo apt-get install -y --no-install-recommends \
+            -o Acquire::Retries=3 -o Acquire::http::Timeout=30 \
             ack antlr3 asciidoc autoconf automake autopoint binutils bison \
             build-essential bzip2 ccache clang cmake cpio curl \
             device-tree-compiler ecj fastjar flex gawk gettext \
@@ -231,15 +233,43 @@ jobs:
 
       - name: "[2.4] 克隆 ImmortalWrt 源码"
         run: |
-          git clone -b ${{ steps.version.outputs.tag }} \
-            --single-branch --filter=blob:none \
-            https://github.com/immortalwrt/immortalwrt.git \
-            /tmp/immortalwrt
+          TAG="${{ steps.version.outputs.tag }}"
+          rm -rf /tmp/immortalwrt
+          ok=0
+          for attempt in 1 2 3; do
+            if git clone -b "$TAG" --single-branch --filter=blob:none \
+                 https://github.com/immortalwrt/immortalwrt.git /tmp/immortalwrt; then
+              echo "[OK] 克隆成功（第 ${attempt} 次尝试）"
+              ok=1
+              break
+            fi
+            echo "[WARN] 克隆失败，10 秒后重试（第 ${attempt}/3 次）"
+            rm -rf /tmp/immortalwrt
+            sleep 10
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "::error::克隆 ImmortalWrt 源码失败（已重试 3 次）"
+            exit 1
+          fi
           ln -sf /tmp/immortalwrt $GITHUB_WORKSPACE/immortalwrt
 
       - name: "[2.5] 更新 feeds"
         working-directory: immortalwrt
-        run: ./scripts/feeds update -a
+        run: |
+          ok=0
+          for attempt in 1 2 3; do
+            if ./scripts/feeds update -a; then
+              echo "[OK] feeds 更新成功（第 ${attempt} 次尝试）"
+              ok=1
+              break
+            fi
+            echo "[WARN] feeds 更新失败，10 秒后重试（第 ${attempt}/3 次）"
+            sleep 10
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "::error::feeds 更新失败（已重试 3 次）"
+            exit 1
+          fi
 
       - name: "[2.6] 安装 feeds"
         working-directory: immortalwrt
@@ -427,10 +457,21 @@ jobs:
         working-directory: immortalwrt
         run: |
           echo "多线程下载: -j$(nproc)"
-          make download -j$(nproc) || {
-            echo "[WARN] make download 未完全成功，检查 dl 目录是否已有足够源码包"
+          ok=0
+          for attempt in 1 2 3; do
+            if make download -j"$(nproc)"; then
+              echo "[OK] 源码下载完成（第 ${attempt} 次尝试）"
+              ok=1
+              break
+            fi
+            echo "[WARN] make download 未完全成功，10 秒后重试（第 ${attempt}/3 次）"
+            sleep 10
+          done
+          if [ "$ok" -ne 1 ]; then
+            # 单个包下载失败不阻断整轮：后续 make 会按需再取，真缺包时才会失败
+            echo "[WARN] make download 三次均未完全成功，检查 dl 目录是否已有足够源码包"
             ls dl 2>/dev/null | wc -l
-          }
+          fi
 
       - name: "[4.2] 编译固件"
         if: ${{ !inputs.skip_compile }}
@@ -499,6 +540,25 @@ jobs:
         with:
           path: immortalwrt/.ccache
           key: ccache-${{ runner.os }}-${{ steps.device.outputs.platform }}-${{ steps.version.outputs.tag }}-cc2-failed-${{ github.run_id }}
+
+      # 每次失败新增一个 -failed-<run_id> 缓存，长期累积会挤占每仓库 10GB 配额，
+      # 把正常缓存按 LRU 淘汰。成功构建后清理历史失败缓存；权限不足时只告警不影响构建。
+      - name: "[4.2.3] 清理历史失败缓存"
+        if: success() && inputs.cache_enabled && !inputs.skip_compile
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PATTERN="ccache-${{ runner.os }}-${{ steps.device.outputs.platform }}-${{ steps.version.outputs.tag }}-cc2-failed-"
+          ids=$(gh cache list --limit 100 --json id,key \
+            --jq ".[] | select(.key | startswith(\"$PATTERN\")) | .id" 2>/dev/null || true)
+          if [ -z "$ids" ]; then
+            echo "[INFO] 无历史失败缓存需要清理"
+            exit 0
+          fi
+          for id in $ids; do
+            gh cache delete "$id" 2>/dev/null && echo "[OK] 已删除失败缓存 id=$id" || true
+          done
 
       - name: "[4.3] 编译后磁盘使用"
         if: ${{ !inputs.skip_compile && !cancelled() }}
