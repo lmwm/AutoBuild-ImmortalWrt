@@ -155,7 +155,7 @@ jobs:
             intltool lib32gcc-s1 libc6-dev-i386 libelf-dev libglib2.0-dev \
             libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses-dev \
             libpython3-dev libreadline-dev libssl-dev libtool libyaml-dev \
-            libz-dev lld llvm llvm-dev lrzsz mkisofs msmtp nano ninja-build p7zip \
+            libz-dev lld llvm lrzsz mkisofs msmtp nano ninja-build p7zip \
             p7zip-full patch pkgconf python3 python3-pip python3-ply \
             python3-docutils python3-pyelftools python3-setuptools qemu-utils \
             re2c rsync scons squashfs-tools subversion swig texinfo uglifyjs \
@@ -404,47 +404,18 @@ jobs:
         working-directory: immortalwrt
         run: make defconfig
 
-      # rust/host 默认 --set=llvm.download-ci-llvm=true，会去 rust CI 拉预编译 LLVM；
-      # 该地址返回 404（实测 run 45495817180 多线程/单线程/V=s 三级重试全败），且 S3 上带
-      # x-amz-delete-marker（旧构建产物会被定期清理），不可恢复，故改为 false。
-      # 但仅置 false 会让 bootstrap 回退到「源码编译 LLVM」，多出约 2 小时（实测 run 45388406468 4h52m）。
-      # bootstrap 的 LLVM 来源优先级是：外部 llvm-config > CI 下载 > 源码构建（llvm.rs
-      # prebuilt_llvm_output），故同时指向系统 LLVM（[2.1] 已装 llvm-dev，提供 llvm-config），
-      # 直接跳过源码编译。宿主三元组硬编码为 x86_64-unknown-linux-gnu（RUSTC_HOST_ARCH 的推导结果）。
+      # rust/host 默认 --set=llvm.download-ci-llvm=true，会去 rust CI 拉预编译 LLVM，
+      # 该地址在 Actions 上返回 404（实测 run 45495817180 多线程/单线程/V=s 三级重试全败）。
+      # 改为 false 后实测可成功构建（run 45388406468，含 Rust/LLVM 的整轮 4h52m）。
       # YJIT 已不再关闭（rust 每次都会编），故本步骤无条件执行；若 rust 不在依赖图里
       # Makefile 不存在，只告警不失败。
-      - name: "[3.7] 修复 Rust LLVM 来源"
+      - name: "[3.7] 修复 Rust LLVM CI 下载"
         run: |
           RUST_MAKEFILE="immortalwrt/feeds/packages/lang/rust/Makefile"
           if [ -f "$RUST_MAKEFILE" ]; then
-            # 1) 禁掉上游硬编码的 CI 下载（产物已删除，必然 404）
             sed -i 's/--set=llvm\.download-ci-llvm=true/--set=llvm.download-ci-llvm=false/' "$RUST_MAKEFILE"
-
-            # 2) 指向系统 LLVM：优先 command -v，退化到版本号后缀的常见路径
-            LLVM_CONFIG=$(command -v llvm-config || true)
-            if [ -z "$LLVM_CONFIG" ]; then
-              LLVM_CONFIG=$(ls -1 /usr/bin/llvm-config-* /usr/lib/llvm-*/bin/llvm-config 2>/dev/null | sort -V | tail -1)
-            fi
-            if [ -n "$LLVM_CONFIG" ] && [ -x "$LLVM_CONFIG" ]; then
-              if ! grep -q 'target.x86_64-unknown-linux-gnu.llvm-config' "$RUST_MAKEFILE"; then
-                # 在 download-ci-llvm 行之后插入系统 LLVM 配置。原行自带行尾续行反斜杠，
-                # 用 awk 插入（printf 输出真 tab + 续行反斜杠），避免 sed 替换弄丢续行符。
-                awk -v cfg="$LLVM_CONFIG" '
-                  /--set=llvm\.download-ci-llvm=false/ {
-                    print
-                    printf "\t--set=target.x86_64-unknown-linux-gnu.llvm-config=%s \\\n", cfg
-                    next
-                  }
-                  { print }
-                ' "$RUST_MAKEFILE" > "$RUST_MAKEFILE.tmp" && mv "$RUST_MAKEFILE.tmp" "$RUST_MAKEFILE"
-                echo "[OK] 已指向系统 LLVM: $LLVM_CONFIG"
-              fi
-            else
-              echo "[WARN] 未找到 llvm-config（应装 llvm-dev），将回退为源码编译 LLVM，约多 2 小时"
-            fi
-
             echo "[OK] 已禁用 download-ci-llvm"
-            grep -n 'download-ci-llvm\|llvm-config' "$RUST_MAKEFILE" || true
+            grep 'download-ci-llvm' "$RUST_MAKEFILE" || true
           else
             echo "[WARN] Rust Makefile 不存在: $RUST_MAKEFILE"
           fi
